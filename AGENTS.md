@@ -72,12 +72,31 @@ Consumption rules for `CONTEXT.md` / ADRs (created lazily, may not exist yet): `
 
 ### Releases
 
-Use the release PR process in `docs/releasing.md` before tagging. Give the PR
-a `release/vX.Y.Z` head branch or `release: vX.Y.Z` title, run
-`make prepare-release RELEASE_VERSION=vX.Y.Z`, and review the generated
-changelog and `server.json` changes. CI checks both files before merge, and
-`release.yml` re-checks `server.json` against the tag on release.
+`dev` is the rebased development line; `main` only receives release PRs. Use
+the process in `docs/releasing.md` before tagging. Write the `## Unreleased`
+notes **before** cutting the release — one short paragraph per user-visible
+change since the last release, not a design note; `make prepare-release` only
+moves them. Give the PR a `release/vX.Y.Z` head branch or `release: vX.Y.Z`
+title, run `make prepare-release RELEASE_VERSION=vX.Y.Z`, and review the
+generated changelog and `server.json` changes. CI checks both files before
+merge, and `release.yml` re-checks `server.json` against the tag on release.
 
+A `vX.Y.Z-rc.N` tag is an internal test build: it adds a dated changelog
+section, **leaves `server.json` alone** (no registry entry, no `:latest` move)
+and is marked as a GitHub pre-release. Its branch and PR name the rc itself
+(`release/v0.2.8-rc.1`), because CI requires the release signal to match the
+files exactly — the final release is its own PR (`release/v0.2.8`).
+`docs/releasing.md` has the details.
+### Tests run in CI on three OSes
+
+Whenever you write or modify a test, remember it must pass in
+`.github/workflows/test.yml` — ubuntu, macos and windows, via
+`go test ./... -count=1 -shuffle=on -race -timeout 240s` (identical to
+`make test`). For races the detector cannot see — filesystem and lifecycle
+races — run `make test-stress` locally before pushing. Assume concurrency, a
+fresh runner, and dirty state from other tests or processes. Never hardcode a
+shared absolute path; `t.TempDir()` is the default. See
+`docs/agents/testing.md`.
 ## Driving Termcp's MCP tools
 
 Working in this repo usually means driving Termcp itself. The full tool

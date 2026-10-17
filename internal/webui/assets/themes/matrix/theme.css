@@ -1,0 +1,171 @@
+@import url("./assets/static/css/app.css");
+
+/* Theme-owned fonts stay local: the console also works without Internet access. */
+@font-face {
+  font-family: "Termcp Matrix Pixel";
+  src: url("./assets/fonts/PixelifySans.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark;
+  --bg-canvas: #050c06;
+  --bg-subtle: #09160b;
+  --bg-card: #0b1d0e;
+  --bg-card-hover: #14331a;
+  --bg-elevated: #102716;
+  --bg-input: #061009;
+  --bg-header: #09160b;
+  --glass-plate: var(--bg-card);
+  --glass-plate-strong: var(--bg-elevated);
+  --glass-tile: var(--bg-card);
+  --glass-archived: var(--bg-subtle);
+  --glass-blur: 0px;
+  --blackwall-image: none;
+  --text-primary: #d3ffd2;
+  --text-secondary: #a1dba0;
+  --text-muted: #83bc82;
+  --text-faint: #69a468;
+  --text-bright: #e8ffe2;
+  --text-on-accent: #051008;
+  --cyan-rgb: 118, 255, 3;
+  --cyan: rgb(var(--cyan-rgb));
+  --cyan-hover: #adff65;
+  --cyan-deep: #1c4a12;
+  --cyan-surface: rgba(var(--cyan-rgb), .14);
+  --cyan-border: rgba(var(--cyan-rgb), .6);
+  --green-rgb: 92, 255, 120;
+  --green: rgb(var(--green-rgb));
+  --green-hover: #a0ffb0;
+  --green-dark: var(--green);
+  --green-deep: #164421;
+  --green-bright: #a0ffb0;
+  --yellow-rgb: 238, 255, 99;
+  --yellow: rgb(var(--yellow-rgb));
+  --yellow-bright: #f4ffac;
+  --yellow-deep: #454a17;
+  --pink-rgb: 255, 125, 143;
+  --pink: rgb(var(--pink-rgb));
+  --pink-hover: #ffadba;
+  --pink-soft: #ffadba;
+  --purple-rgb: 197, 165, 255;
+  --purple: rgb(var(--purple-rgb));
+  --purple-surface: rgba(var(--purple-rgb), .18);
+  --orange-rgb: 255, 192, 108;
+  --orange: rgb(var(--orange-rgb));
+  --orange-surface: rgba(var(--orange-rgb), .16);
+  --orange-border: rgba(var(--orange-rgb), .5);
+  --border-subtle: #315b30;
+  --border-strong: #66ad3d;
+  --accent: var(--cyan);
+  --accent-hover: var(--cyan-hover);
+  --accent-surface: rgba(var(--cyan-rgb), .14);
+  --accent-surface-soft: rgba(var(--cyan-rgb), .06);
+  --accent-border: rgba(var(--cyan-rgb), .6);
+  --accent-ring: rgba(var(--cyan-rgb), .3);
+  --overlay-scrim: rgba(2, 8, 3, .65);
+  --overlay-modal: rgba(2, 8, 3, .8);
+  --toast-bg: var(--bg-elevated);
+  --glow-white-04: rgba(var(--cyan-rgb), .08);
+  --glow-white-10: rgba(var(--cyan-rgb), .12);
+  --shadow-dropdown: rgba(2, 8, 3, .65);
+  --shadow-drawer: rgba(2, 8, 3, .65);
+  --shadow-soft: rgba(2, 8, 3, .6);
+  --shadow-card-soft: rgba(2, 8, 3, .6);
+  --shadow-card: rgba(2, 8, 3, .65);
+  --shadow-card-hover: rgba(2, 8, 3, .7);
+  --shadow-modal: rgba(2, 8, 3, .75);
+  --live-glow: rgba(var(--green-rgb), .35);
+  --font-sans: "Termcp Matrix Pixel", var(--font-mono);
+  --font-sans-hant: "Termcp Matrix Pixel", var(--font-mono);
+  --theme-icon-filter: none;
+  --xterm-background: var(--bg-input);
+  --matrix-terminal-text: #b6ff99;
+  --xterm-foreground: var(--matrix-terminal-text);
+  --xterm-black: #0b1d0e;
+  --xterm-blue: #82bbff;
+  --xterm-cyan: #75ffe1;
+  --xterm-white: #d3ffd2;
+  --xterm-bright-blue: #b1d4ff;
+  --xterm-bright-cyan: #b3fff0;
+  --xterm-bright-white: #e8ffe2;
+  --terminal-transparent: false;
+  --terminal-font-weight: 700;
+  --terminal-font-weight-bold: 900;
+  --matrix-shadow: 4px 4px 0 #020803, 6px 6px 0 #315b30;
+}
+
+body { font-weight: 700; }
+.page-backdrop { animation: none; background-image: url("./assets/icons/background.svg"); background-position: center top; opacity: .55; }
+.app-header { border-bottom: 3px solid var(--accent); box-shadow: 0 3px 0 #020803; }
+.app-header h1 { font-family: var(--font-sans); font-weight: 700; font-size: 1.6rem; letter-spacing: .02em; color: var(--accent); text-shadow: 2px 2px 0 #315b30; }
+
+/* Rectangular plates and offset, hard shadows give the controls a pixel-game
+   silhouette. Keep the shared geometry and all hide/minimize rules intact. */
+.workspace-sessions, #sec-entries-body, .modal,
+.theme-menu, .lang-menu, .ui-notify-card {
+  border: 2px solid var(--border-strong); border-radius: 0;
+  background: var(--bg-card); box-shadow: var(--matrix-shadow);
+}
+.workspace-sessions .section-header, .modal-h { border-bottom: 2px solid var(--border-subtle); }
+.section-title, .modal-h h2, .nethub-label, .sess-name,
+.conn-name, .ui-notify-title { font-family: var(--font-sans); font-weight: 700; }
+.nethub-btn { border-width: 2px; box-shadow: 3px 3px 0 #020803; font-family: var(--font-sans); font-size: .9rem; letter-spacing: .02em; }
+.nethub-icon, .terminal-shell-icon { image-rendering: pixelated; }
+
+.conn-tile.entry-card, .conn-tile.sess-tile {
+  border: 2px solid var(--border-subtle); border-radius: 0;
+  box-shadow: 3px 3px 0 #020803;
+  transition: border-color .12s, background .12s, transform .12s;
+}
+.conn-tile.entry-card:hover, .conn-tile.sess-tile:hover {
+  border-color: var(--accent); box-shadow: 3px 3px 0 #315b30; transform: translateY(-1px);
+}
+.conn-tile.sess-tile.batch-selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.conn-tile.sess-tile .sess-status-ic { border-radius: 0; }
+.conn-tile.sess-tile .sess-status-ic.is-live { background: var(--accent); box-shadow: 2px 2px 0 #315b30; animation: none; }
+.sess-terminal-ic { border-radius: 0; border-width: 2px; }
+.sess-terminal-ic img.terminal-shell-icon { filter: none; }
+
+.btn, .icon-btn, .lang-btn, .theme-btn, .theme-option, .lang-opt,
+.nethub-toolbar button, .session-tabbar-toggle, .session-tabbar-layout,
+.shell-window-header-btns button, .shell-tab-btn, .title-copy-btn,
+.shell-channel-tab-add, .shell-channel-add-caret {
+  border-radius: 0; font-weight: 700;
+}
+.btn, .lang-btn, .theme-btn { border-width: 2px; box-shadow: 2px 2px 0 #020803; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); }
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); box-shadow: 2px 2px 0 #315b30; }
+.btn:active, .lang-btn:active, .theme-btn:active { transform: translate(1px, 1px); box-shadow: none; }
+.theme-option[aria-pressed="true"], .lang-opt.active { background: var(--accent); color: var(--text-on-accent); }
+.theme-option:focus-visible, .lang-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.modal-body input, .modal-body select, .modal-body textarea,
+.conn-field input, .conn-field select, .conn-field textarea { border-width: 2px; border-radius: 0; font-weight: 700; }
+
+.shell-window:not(.win-fullscreen) { border-radius: 0; border-width: 2px; box-shadow: var(--matrix-shadow); }
+.shell-window.win-active:not(.win-fullscreen) { border-color: var(--accent); box-shadow: var(--matrix-shadow); }
+.pane-grid > .shell-window { box-shadow: none; }
+.shell-window-header { border-bottom-width: 2px; }
+.shell-window-title .sw-conn, .session-tab .session-tab-label { font-family: var(--font-sans); font-weight: 700; }
+.session-tab { border-width: 2px; border-radius: 0; font-weight: 700; }
+.session-tab.active { color: var(--accent); box-shadow: inset 0 -2px 0 var(--accent); }
+.session-tab .session-tab-num, .shell-window-title .shell-dead-badge,
+.approval-chip, .approval-code, .approval-src, .approval-kind { border-radius: 0; }
+.sess-plate-empty { font: 700 .9rem/1.6 var(--font-sans); letter-spacing: .02em; text-transform: none; }
+.sess-plate-empty::before { content: '[ '; }
+.sess-plate-empty::after { content: ' ]'; }
+
+/* docs.css is loaded after the theme, so scope its plates to the docs page. */
+.docs-page .app-header { border-bottom: 3px solid var(--accent); }
+.docs-page .app-header h1 { font-family: var(--font-sans); font-weight: 700; letter-spacing: .02em; }
+.docs-page .card { border: 2px solid var(--border-strong); border-radius: 0; box-shadow: var(--matrix-shadow); }
+.docs-page .copy-btn, .docs-page .toc a, .docs-page .ep,
+.docs-page .meta span, .docs-page .note, .docs-page .block pre { border-radius: 0; border-width: 2px; }
+.docs-page .copy-btn, .docs-page .toc a { font-weight: 700; }
+
+@media (prefers-reduced-motion: reduce) {
+  .conn-tile.entry-card:hover, .conn-tile.sess-tile:hover,
+  .btn:active, .lang-btn:active, .theme-btn:active { transform: none; }
+}

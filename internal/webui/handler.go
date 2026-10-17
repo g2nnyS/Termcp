@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/open-mcp-ai/termcp/internal/approval"
+	"github.com/open-mcp-ai/termcp/internal/extensions"
 	"github.com/open-mcp-ai/termcp/internal/forward"
+	"github.com/open-mcp-ai/termcp/internal/message"
 	"github.com/open-mcp-ai/termcp/internal/notify"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
@@ -59,11 +61,16 @@ func markdownContentType(next http.Handler) http.Handler {
 // Handler serves the browser UI and JSON/SSE APIs at / and /api/... .
 type Handler struct {
 	Sessions   *session.Manager
+	MsgMgr     *message.Manager
 	SSH        *sshconfig.Store
 	ForwardMgr *forward.ForwardManager
 	NotifyMgr  *notify.Manager // active shell notification rules (read-only listing + delete)
-	NoInternal bool            // when true, hide and refuse the built-in loopback profile
-	Version    string          // build version (`termcp -version`), served at GET /api/version
+	// Extensions drives the right-side panel: it lists the pinned,
+	// capability-trimmed sessions and reports whether each is up. nil in a build
+	// that does not run the reconciler, in which case the panel is simply empty.
+	Extensions *extensions.Reconciler
+	NoInternal bool   // when true, hide and refuse the built-in loopback profile
+	Version    string // build version (`termcp -version`), served at GET /api/version
 
 	// Daemon marks this process as a background instance (started with
 	// `termcp daemon start` or `termcp daemon stdio`): it may carry an idle
@@ -119,6 +126,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	if h.SSH != nil {
 		h.SSH.SetOnChange(h.sessionHub().broadcast)
 	}
+	if h.Extensions != nil {
+		// An extension's status transition is what the right panel renders, so it
+		// rides the same signal as a connection change: every tab refetches.
+		h.Extensions.SetOnChange(h.sessionHub().broadcast)
+	}
 	// Build metadata
 	mux.HandleFunc("GET /api/version", h.handleVersion)
 	// Daemon management (`termcp daemon status|start|stop`): an instance is
@@ -134,6 +146,21 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/connections/{name}", h.handlePutConnection)
 	mux.HandleFunc("DELETE /api/connections/{name}", h.handleDeleteConnection)
 	mux.HandleFunc("POST /api/connections/test", h.handleTestConnection)
+
+	// Extensions (the right panel): templates for pinned, capability-trimmed
+	// sessions with the reconciler's live status on each. The authoring routes
+	// write through the same store the MCP `extension` tool uses, so a template
+	// saved from the browser and one saved by an agent are indistinguishable, and
+	// the batch pair is the panel's export and import — one document holding many
+	// templates, the same shape in both directions.
+	mux.HandleFunc("GET /api/extensions", h.handleListExtensions)
+	mux.HandleFunc("POST /api/extensions", h.handleCreateExtension)
+	mux.HandleFunc("GET /api/extensions/batch", h.handleExportExtensions)
+	mux.HandleFunc("POST /api/extensions/batch", h.handleImportExtensions)
+	mux.HandleFunc("GET /api/extensions/{name}", h.handleGetExtension)
+	mux.HandleFunc("PUT /api/extensions/{name}", h.handleUpdateExtension)
+	mux.HandleFunc("DELETE /api/extensions/{name}", h.handleDeleteExtension)
+	mux.HandleFunc("POST /api/extensions/{name}/retry", h.handleRetryExtension)
 
 	// Sessions
 	mux.HandleFunc("GET /api/sessions", h.handleListSessions)
@@ -161,6 +188,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/shells/{id}/output-range", h.handleShellOutputRange)
 	// The status index behind output-range: where each span starts and what made it.
 	mux.HandleFunc("GET /api/shells/{id}/marks", h.handleShellMarks)
+	// Line-addressed reads over the same log (REST twin of shell_output from_line).
+	mux.HandleFunc("GET /api/shells/{id}/lines", h.handleShellLines)
 	// The row layout of that log for one terminal width, with the marks on it.
 	mux.HandleFunc("GET /api/shells/{id}/rail", h.handleShellRail)
 	mux.HandleFunc("DELETE /api/shells/{id}", h.handleCloseShell)
@@ -206,11 +235,15 @@ func (h *Handler) Register(mux *http.ServeMux) {
 		mux.Handle("/", embeddedStaticServer())
 	} else {
 		// Pure-API build (go build -tags no_webui): the browser UI is neither
-		// embedded nor routed. The two agent documents stay, each on its own
-		// path; everything else under / is a 404.
+		// embedded nor routed. The three agent documents stay, each on its own
+		// path; everything else under / is a 404. The extension guide is one of
+		// them because the extension tool is always registered — a build that
+		// hands out the tool but not its guide is telling an agent to read a
+		// document it cannot fetch.
 		docs := embeddedStaticServer()
 		mux.Handle("/api.md", docs)
 		mux.Handle("/skills.md", docs)
+		mux.Handle("/extensions.md", docs)
 	}
 }
 

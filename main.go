@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/auth"
 	"github.com/open-mcp-ai/termcp/internal/config"
 	"github.com/open-mcp-ai/termcp/internal/daemon"
+	"github.com/open-mcp-ai/termcp/internal/extensions"
 	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/logansi"
 	mcpmod "github.com/open-mcp-ai/termcp/internal/mcp"
@@ -101,6 +103,7 @@ func main() {
 	flag.StringVar(&cfg.AuthHash, "auth-hash", cfg.AuthHash, "Salted SHA-256 HTTP token hash (or $TERMCP_AUTH_HASH; generate with 'termcp --gen-auth-hash')")
 	flag.BoolVar(&cfg.DisableAuth, "disable-auth", cfg.DisableAuth, "Disable HTTP authentication entirely, even on non-loopback binds (or TERMCP_DISABLE_AUTH_TOKEN=1). Errors out if a token or hash is also configured.")
 	flag.BoolVar(&cfg.MCPDeferTools, "mcp-defer-tools", cfg.MCPDeferTools, "Mark low-frequency MCP tools with defer_loading so clients fetch them on demand. Off by default: every tool is listed eagerly, which is what clients without deferred-tool support (e.g. Codex behind a gateway) need.")
+	flag.StringVar(&cfg.MCPDeferToolsLevel, "mcp-defer-tools-level", cfg.MCPDeferToolsLevel, "MCP defer_loading level: off (every tool eager, default), partial (driving loop eager, low-frequency surfaces deferred), all (only session_start/shell_input/shell_key/shell_output eager). Overrides --mcp-defer-tools.")
 	var genAuthHash bool
 	flag.BoolVar(&genAuthHash, "gen-auth-hash", false, "Generate the salted SHA-256 hash of a token for --auth-hash / $TERMCP_AUTH_HASH, then exit (token from an argument, or from stdin without echo on a terminal)")
 	var showVersion bool
@@ -349,13 +352,36 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 
 	forwardMgr := forward.NewForwardManager()
 
+	// The extension reconciler keeps every enabled extension's session warm and
+	// reports its state. It owns its loop's context — Stop cancels it — and the
+	// shutdown path stops it before the sessions are marked dead, so an in-flight
+	// probe cannot spawn a connection the process is about to leave.
+	extReconciler := extensions.NewReconciler(
+		extensions.NewStore(cfg.DataDir), sessMgr, msgMgr, sshStore, forwardMgr,
+	)
+	extReconciler.NoInternal = cfg.NoInternal
+	if err := extReconciler.Start(context.Background()); err != nil {
+		slog.Error("failed to start extension reconciler", "err", err)
+		os.Exit(1)
+	}
+
 	mcpOpts := []mcpmod.Option{mcpmod.WithHTTPServer(mainSrv)}
-	if cfg.MCPDeferTools {
-		// Opt-in: tag low-frequency tools defer_loading so clients fetch their
-		// schemas on demand. Off by default because clients that drop the marker
-		// (any Codex talking through a gateway, for instance) would lose those
-		// tools entirely rather than merely load them later.
-		mcpOpts = append(mcpOpts, mcpmod.DeferTools())
+	// defer_loading level: the graded flag wins; the legacy bool maps to the
+	// partial level. Off by default because clients that drop the marker (any
+	// Codex talking through a gateway, for instance) would lose deferred tools
+	// entirely rather than merely load them later.
+	deferLevel := cfg.MCPDeferToolsLevel
+	if deferLevel == "" && cfg.MCPDeferTools {
+		deferLevel = mcpmod.DeferPartial
+	}
+	switch deferLevel {
+	case "", mcpmod.DeferOff, mcpmod.DeferPartial, mcpmod.DeferAll:
+	default:
+		slog.Error("invalid --mcp-defer-tools-level", "level", deferLevel, "valid", "off|partial|all")
+		os.Exit(2)
+	}
+	if deferLevel != "" && deferLevel != mcpmod.DeferOff {
+		mcpOpts = append(mcpOpts, mcpmod.DeferLevel(deferLevel))
 	}
 	mcpSrv := mcpmod.New(sessMgr, msgMgr, sshStore, forwardMgr, versionString(), mcpOpts...)
 	// Same embedded docs the Web UI serves over HTTP become MCP resources/prompts.
@@ -367,7 +393,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	mux.Handle("GET /sse", mcpSrv.SSEHandler())
 	mux.Handle("POST /message", mcpSrv.MessageHandler())
 	mux.Handle("/stream", mcpSrv.StreamableHTTPHandler())
-	webuiH := &webui.Handler{Sessions: sessMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339)}
 	// The effective countdown is published at GET /api/daemon so the stdio
 	// bridge can ping faster than it (see daemon.InstanceInfo.IdleTimeoutMS).
 	if isDaemonChild {
@@ -384,6 +410,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	webuiH.ExecuteOperation = mcpSrv.ExecuteApprovedOperation
 	webuiH.Register(mux)
 	// Bridge the MCP notify_user tool to the browser UI (toast/highlight push).
+	mcpSrv.SetExtensionReconciler(extReconciler)
 	mcpSrv.SetUINotifier(webuiH.BroadcastUINotify)
 
 	// An approval decision must also wake an agent parked on shell_notify, so it
@@ -416,6 +443,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 		shutdownOnce.Do(func() {
 			shuttingDown.Store(true)
 			slog.Info("shutting down", "reason", reason)
+			extReconciler.Stop()
 			// Disconnect ≠ delete: DEAD all running sessions (retain history) instead
 			// of killing/clearing every shell.
 			sessMgr.MarkAllDead()

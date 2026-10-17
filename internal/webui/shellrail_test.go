@@ -32,7 +32,7 @@ func serveRail(t *testing.T, log []byte, query string) railBody {
 	dir := t.TempDir()
 	store := storage.New(dir)
 	const sessID, shellID = "s-rail", "sh-rail"
-	if _, err := store.AppendLog(sessID, shellID, log); err != nil {
+	if _, err := store.AppendLog(sessID, shellID, log, storage.StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendMark(sessID, shellID, api.LogMark{Status: api.LogOutput, Time: 1758499205123, Offset: 0}); err != nil {

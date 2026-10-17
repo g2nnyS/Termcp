@@ -1,0 +1,24 @@
+{
+  "terminal": {
+    "fontFamily": "var(--font-mono)",
+    "fontSize": 14,
+    "fontWeight": 700,
+    "fontWeightBold": 900,
+    "lineHeight": 1.1,
+    "letterSpacing": 0,
+    "transparent": false,
+    "opacity": 1,
+    "background": "var(--bg-input)",
+    "foreground": "var(--matrix-terminal-text)",
+    "cursor": "var(--accent)",
+    "cursorAccent": "var(--bg-input)",
+    "selectionBackground": "var(--accent-ring)",
+    "window": {
+      "background": "var(--bg-input)",
+      "foreground": "var(--text-primary)",
+      "headerBackground": "var(--bg-elevated)",
+      "borderColor": "var(--accent)",
+      "blur": 0
+    }
+  }
+}

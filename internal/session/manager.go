@@ -48,7 +48,7 @@ type Manager struct {
 	onOutputHook func(shellID string)
 	onExitHook   func(shellID string, exitCode *int)
 	onCloseHook  func(shellID string)
-	onDeadHook   func(sessionID string)
+	onDeadHooks  []func(sessionID string)
 }
 
 // NewManager creates a Manager. internalSSH must be the built-in sshserver.Server (after Start) when using internal profiles; may be nil if only remote sessions are used in tests.

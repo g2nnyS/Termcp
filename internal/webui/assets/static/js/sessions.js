@@ -11,6 +11,15 @@ var _sessionRegions = [
  *  archive rather than dropping it. */
 function isDeadSession(s) { return !(s && s.status === 'running'); }
 
+/** Sessions a subsystem keeps for itself stay off both plates.
+ *
+ *  The extension layer holds one connection per host and serves its extensions
+ *  through channels in it; that session is termcp's own infrastructure rather
+ *  than something the user asked for, so it is reported in the extension column
+ *  and nowhere else. The record carries the namespace, which is what makes the
+ *  hiding survive a restart: a client-side list of ids would not. */
+function isHiddenSession(s) { return !!(s && s.namespace); }
+
 /* ---- sessions still being dialled ----
  *
  * A connect that is still in progress has no session yet: the server registers
@@ -63,10 +72,14 @@ function pendingSessionRecords() {
 }
 
 /** The list every plate reads: the server's snapshot plus the dials the server
- *  cannot know about yet. One place composes them, so the running plate, both
- *  regions' membership, and pruning all see the same list. */
+ *  cannot know about yet, minus the sessions a subsystem owns. One place composes
+ *  them, so the running plate, the archive, both regions' membership and pruning
+ *  all see the same list — a hidden session that only the renderer skipped would
+ *  still be counted by "select all" and ticked by the batch bar. */
 function sessionsWithPending() {
-  return (window._lastSessionsSnapshot || []).concat(pendingSessionRecords());
+  return (window._lastSessionsSnapshot || []).filter(function (s) {
+    return !isHiddenSession(s);
+  }).concat(pendingSessionRecords());
 }
 
 /** Stop a dial in progress. This is the batch form of the placeholder window's

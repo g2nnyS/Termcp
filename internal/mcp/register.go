@@ -29,7 +29,7 @@ func New(sessMgr *session.Manager, msgMgr *message.Manager, sshConfigs *sshconfi
 	// manager does not know the forward manager, so wire the cascade here at the
 	// composition point shared by the MCP and Web UI surfaces.
 	if sessMgr != nil && forwardMgr != nil {
-		sessMgr.SetOnDeadHook(forwardMgr.CloseBySession)
+		sessMgr.AddOnDeadHook(forwardMgr.CloseBySession)
 	}
 	s := &Server{
 		sessMgr:    sessMgr,

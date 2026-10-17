@@ -15,8 +15,8 @@ func TestTokenBudgetGuard(t *testing.T) {
 	// Measure the listing as the model receives it, decorated address included:
 	// that per-request decoration is part of the payload this guard protects.
 	tools := listTools(t, s, originContext("http://127.0.0.1:18765"))
-	if len(tools) != 31 {
-		t.Fatalf("expected 31 tools, got %d", len(tools))
+	if len(tools) != 32 {
+		t.Fatalf("expected 32 tools, got %d", len(tools))
 	}
 
 	total := 0
@@ -49,18 +49,21 @@ func TestTokenBudgetGuard(t *testing.T) {
 	t.Logf("property descriptions: %d B", propDescBytes)
 	t.Logf("instructions: %d B", instructionsLen)
 
-	// Budgets (bytes, rough 4:1 B:tokl ratio for English text)
+	// Budgets (bytes, rough 4:1 B:tokl ratio for English text). The per-tool
+	// budgets scale with the tool count: they are averages over the whole
+	// surface, and a surface that grows past its headroom is expected to raise
+	// these rather than shed descriptions.
 	if total > 25000 {
 		t.Errorf("tools/list total %d B exceeds 25000 B budget", total)
 	}
-	if descBytes > 4000 {
-		t.Errorf("tool descriptions %d B exceeds 4000 B budget", descBytes)
+	if descBytes > 5000 {
+		t.Errorf("tool descriptions %d B exceeds 5000 B budget", descBytes)
 	}
-	if propDescBytes > 4000 {
-		t.Errorf("property descriptions %d B exceeds 4000 B budget", propDescBytes)
+	if propDescBytes > 5000 {
+		t.Errorf("property descriptions %d B exceeds 5000 B budget", propDescBytes)
 	}
-	if instructionsLen > 2400 {
-		t.Errorf("instructions %d B exceeds 2400 B budget", instructionsLen)
+	if instructionsLen > 2600 {
+		t.Errorf("instructions %d B exceeds 2600 B budget", instructionsLen)
 	}
 }
 
@@ -105,8 +108,8 @@ func TestDeferLoadingPolicy(t *testing.T) {
 		}
 	}
 
-	// Opt-in: the hot path stays eager, the wide/low-frequency surfaces defer.
-	on := collect(t, DeferTools())
+	// partial: the hot path stays eager, the wide/low-frequency surfaces defer.
+	on := collect(t, DeferLevel(DeferPartial))
 	for _, name := range core {
 		deferred, ok := on[name]
 		if !ok {
@@ -135,5 +138,26 @@ func TestDeferLoadingPolicy(t *testing.T) {
 			continue
 		}
 		t.Errorf("tool %q is neither in the core list nor deferredTools; classify it", name)
+	}
+
+	// all: only the minimum driving loop stays eager; everything else —
+	// including the partial-level core — defers. A client that supports
+	// deferred loading pays one search round trip per first use; that is the
+	// level's whole point.
+	all := collect(t, DeferLevel(DeferAll))
+	for name := range all {
+		if !allLevelCore[name] && !deferredTools[name] && !isCore[name] {
+			t.Errorf("tool %q is neither all-level core nor classified; it would silently go eager under level=all", name)
+		}
+	}
+	for name := range allLevelCore {
+		deferred, ok := all[name]
+		if !ok {
+			t.Errorf("all-level core tool %q is not registered", name)
+			continue
+		}
+		if deferred {
+			t.Errorf("all-level core tool %q must stay eager: the minimum driving loop cannot require a search", name)
+		}
 	}
 }

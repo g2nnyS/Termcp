@@ -56,6 +56,14 @@
      must not drop the raise while the other is still open. */
   body.header-lang-open .app-header,
   body.header-theme-open .app-header { z-index: 22000; }
+  /* A full-screen window IS the screen, so the page header is not there while one
+     is up. display:none rather than another z-index rung: the header sits behind
+     the terminal at its own 200 anyway, and removing it outright is what keeps an
+     open language/theme menu from reappearing over the terminal as a floating bar
+     the user can neither use nor dismiss. The class is only ever set on touch,
+     where every open window is full-screen, so on desktop the header behaves as
+     it always did. */
+  body.has-fullscreen-window .app-header { display: none; }
   /* The nav wraps instead of squeezing: with the language switch in it, a phone
      width cannot hold the control and the API link side by side, and without
      this the browser breaks the link's label across two lines inside its
@@ -137,6 +145,12 @@
   .btn:hover { background: var(--bg-card-hover); border-color: var(--border-strong); color: var(--text-primary); }
   .btn-primary { background: var(--success); border-color: var(--success); color: var(--text-on-accent); }
   .btn-primary:hover { background: var(--success-hover); border-color: var(--success-hover); }
+  /* A key that cannot be pressed says so: .btn had no disabled state, so a
+     disabled action (the card's retry on an extension that is already up) was
+     indistinguishable from one waiting to be clicked. */
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn:disabled:hover { background: var(--bg-elevated); border-color: var(--border-subtle); color: var(--text-secondary); }
+  .btn-primary:disabled:hover { background: var(--success); border-color: var(--success); color: var(--text-on-accent); }
   /* No min-height here on purpose: the old `calc(100% - 52px)` subtracted a
      guessed header height from a percentage that resolves to auto anyway, so it
      never applied — it only looked like it held the dock to the viewport. The

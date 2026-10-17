@@ -8,8 +8,11 @@
   The default themes use ordinary connection, host and session terminology.
 - Optional `theme.json` configures terminal fonts, colors and window surfaces.
   Both default themes use opaque terminals; cyberpunk retains its glass effect.
-- Three embedded themes: `cyberpunk` preserves the dev appearance, and
-  `default-light` / `default-dark` use soft neutral surfaces and restrained accents.
+- Four embedded themes: `cyberpunk` preserves the dev appearance,
+  `default-light` / `default-dark` use soft neutral surfaces and restrained accents,
+  and `matrix` uses fluorescent green, bold pixel typography, square plates and
+  hard offset shadows. Matrix bundles Pixelify Sans for the UI; terminal output
+  retains the shared CJK-safe monospace stack at a heavier weight.
 - The existing static file server discovers folders at request time. No new
   REST, MCP, WebSocket endpoint or dedicated HTTP route; no theme index file.
 - Selection happens in the Web UI, persists in `termcp.theme` browser storage,
@@ -173,14 +176,14 @@ also refresh. Other static resources retain the existing cache policy.
 | `assets/static/js/i18n.js` | Overlay localized theme copy and refresh static and dynamic labels. |
 | `assets/static/js/terminal-view.js` | Read CSS terminal colors and update all existing channels in place. |
 | `assets/static/css/terminal-theme.css`, `assets/static/js/ui-socket.js` | Apply window surfaces and fit the grid using the terminal's current font options. |
-| `assets/themes/` | Ship the three built-in packages in the binary. |
+| `assets/themes/` | Ship the four built-in packages in the binary. |
 
 ## Verification
 
 - Full Go suite with `-race`, random test order and the CI timeout.
 - Web UI and config stress runs with two repetitions at CPUs 1, 2 and 4.
 - `no_webui` compilation and the docs-only embedding regression.
-- Browser checks for all three themes, documentation preference restoration,
+- Browser checks for all built-in themes, documentation preference restoration,
   live folder discovery, desktop and mobile rendering, and no script errors.
 - A live terminal retained the same xterm, WebSocket and output across switches.
 - Same-timestamp edits to imported external CSS refreshed on theme reselection.

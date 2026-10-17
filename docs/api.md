@@ -100,6 +100,15 @@ the WebSocket. One shared `internal/auth` middleware guards the whole mux. Missi
 wrong credentials return `401 Unauthorized` with `WWW-Authenticate: Basic` (browsers
 show their native login prompt).
 
+A valid token is not the only gate. A session created by an **extension** carries a
+capability whitelist (`allow` / `paths`), and it is enforced on this surface too — a
+call outside it answers `403` with `{"error_code":"forbidden", ...}` instead of
+performing the work. The list is the same one the MCP tools honour, under the same
+names, so `shell_input`, `file_read`, and the rest mean the same thing whichever
+transport you use; a route that mirrors a gated tool is gated with it. There is no
+point retrying: use `extension(action=get)` to read what the template permits, or
+ask the operator to widen it.
+
 | Caller | Credentials |
 |--------|-------------|
 | REST / MCP / curl | `Authorization: Bearer <token>` |
@@ -374,6 +383,14 @@ non-secret label added for host attribution. It is separate from `name` because
 the display name is user-editable: the NetHub reads it to decide which host a
 session belongs to, so a renamed session keeps its lamp.
 
+A record may also carry `namespace` (absent on ordinary sessions). It marks a
+session a subsystem owns rather than one a caller asked for: the extension layer
+keeps one connection per host and serves its extensions through channels in it,
+so those sessions are reported in the extension column (section 15) instead of as
+session or archive cards. They are still addressable everywhere an id is
+accepted — an extension hands out `{session_id, shell_id}` — but they are not
+listed by the MCP `session_list`, and the Web UI hides their cards.
+
 Session records carry no `pid`, for the reason given under `POST /api/sessions`.
 
 ### `POST /api/sessions`
@@ -620,6 +637,9 @@ Query:
   start=0          first byte (default 0; mutually exclusive with tail=1)
   max=262144       max bytes returned (hard cap 512KiB)
   tail=1           take max bytes from the end (ignores start)
+  stream=all       which bytes return: "o" stdout only, "e" stderr only
+                   (pipe channels; a pty merges stderr at the source, so
+                   "e" is always empty there), default "all"
 
 Response 200:
 {
@@ -629,6 +649,14 @@ Response 200:
   "d": "<bytes as a JSON string>"
 }
 ```
+
+> `stream=` filters which of the window's bytes are returned, by low-level
+> producer. It never moves an offset: `start`, `end` and `total` always
+> describe the raw window (start..end covers everything the window held), only
+> `d` shrinks. A line that spans an o/e boundary is split by the filter and
+> rejoined across segments without losing a byte. This is the REST twin of the
+> MCP `shell_output(stream=)` parameter, reading the same `log.stdio` switch
+> index through the same manager.
 
 > `d` is the raw byte window placed in a standard JSON string (not base64). A
 > byte sequence that is not valid UTF-8 cannot survive a JSON string; on Windows
@@ -696,6 +724,39 @@ reason over the entire history asks without them.
 
 Errors: `404` unknown shell; `400` a half-named or invalid window
 (`start and end must be byte offsets with start <= end`).
+
+### `GET /api/shells/{id}/lines`
+
+Line-addressed reads over a shell's byte log — the REST twin of the MCP
+`shell_output(from_line=...)` parameter, reading the same line index
+(`log.stdio`'s sibling `log.lines`) through the same manager. Line numbers are
+1-based and absolute, they never shift for the life of the shell, and the
+trailing partial line (bytes with no closing newline) takes no number.
+
+```
+Query:
+  from=1           first line to return (1-based)
+  count=50         max lines per page (hard cap 1000)
+  content=1        include each line's raw text (newline included); without it
+                   the response carries only the offsets, so a megabyte-sized
+                   line costs nothing until requested
+
+Response 200:
+{
+  "lines": [ { "n": 1, "start": 0, "end": 6, "content": "alpha
+" },
+             { "n": 2, "start": 6, "end": 11 } ],
+  "total_lines": 2,
+  "total_bytes": 16,
+  "session_id": "s-lines",
+  "requested_id": "sh-lines"
+}
+```
+
+`from` past the end is `400` with the reason (the stream has N complete lines),
+never a silent page from elsewhere. Reads work on live and DEAD/restored
+sessions alike; `requested_id` echoes the path id, `session_id` the resolved
+session.
 
 ### `GET /api/shells/{id}/rail`
 
@@ -931,6 +992,9 @@ Downloads a file. Supports HTTP Range.
 | Parameter | Type | Meaning |
 |-----------|------|---------|
 | `path` | query | File path |
+| `h.<Name>` | query | Response header the download must carry, e.g. `?h.Content-Disposition=attachment%3B+filename%3D%22x.png%22`. Repeatable; `file_urls` folds its `response_headers` argument into the URL this way. |
+
+Framing headers (`Content-Length`, `Content-Range`, `Transfer-Encoding`, `Connection`, `Trailer`) belong to the stream and cannot be requested; a requested own header overrides the default one (a requested `Content-Disposition` replaces the `attachment; filename=` the server would send).
 
 ```
 Response: application/octet-stream (Range/206 Partial Content supported)
@@ -1465,3 +1529,98 @@ paths above.
 > the registry as a DEAD, read-only entry). To erase it for good use
 > `DELETE /api/sessions/{id}`. All three routes accept a comma-separated id
 > list (batch) and then answer 200 with per-id results — see section 6.
+
+## 15. Extensions
+
+An extension is a stored template for a session whose capabilities are trimmed to
+what the template's author decided (an MCP server over a pipe shell, a read-only
+file window, an interactive terminal). termcp keeps every enabled extension's
+session warm; extensions that dial the same profile with the same whitelist share
+one session and each drives its own shell channel in it. The same templates are
+authorable over MCP with the `extension` tool — these routes are its REST twin,
+writing the same files in `<data>/extensions/<name>/config.toml`.
+
+### `GET /api/extensions`
+
+Lists every extension with its reconciler status.
+
+```
+Response 200:
+{
+  "extensions": [
+    { "name": "docs", "kind": "skill", "target": "internal", "description": "docs tree",
+      "enabled": true, "status": "available", "session_id": "8f2c1b", "shell_id": "3a91d0" }
+  ]
+}
+```
+
+A row carries `session_id`/`shell_id` when the extension is available (the handles
+to drive it through), `forwards` with the address each declared tunnel bound, and
+`failure` + `next_retry_ms` when it is not. `status` is one of `available`,
+`probing`, `unavailable`, `disabled`.
+
+### `GET /api/extensions/{name}`
+
+One template in full: the shape (`kind`, `target`, `mode`, `command`, `args`), the
+whitelist (`allow`, `paths`), the `notes`, and the failure history.
+
+With `?format=toml` the answer is the file itself (`application/toml`): the text
+`<data>/extensions/<name>/config.toml` holds, so the Web UI's file view edits
+exactly what the store would read back.
+
+### `POST /api/extensions`
+
+Creates a template. `name` and `target` are required; `kind` picks the preset that
+fills the rest (`mcp`, `skill`, `prompt`, or `custom`). Responds `201`, or `409`
+when the name is taken.
+
+### `PUT /api/extensions/{name}`
+
+Patches a stored template: an **omitted** field keeps its value, an **empty array**
+clears it. `PATCH`-style semantics on `PUT`, matching what the MCP tool does.
+
+A body sent as `application/toml` (or `text/plain`) is the file view instead: the
+document replaces the template as written, and nothing is defaulted — what the
+file says is what the template is. A document carrying a `name` key that is not the
+name in the path is refused (`400`), because the name is the directory.
+
+### `DELETE /api/extensions/{name}`
+
+Removes the template (`204`). The session kept warm for it is closed once no other
+extension is served by it.
+
+`{name}` may be a comma-separated batch (`a,b,c`) like the session and profile
+routes: every name is removed independently, the answer is `200` with a per-name
+`results` array instead of `204`, and one bad entry does not stop the rest —
+`extension_not_found` counts as cleared, since another client got there first.
+
+### `POST /api/extensions/{name}/retry`
+
+Reconnects an unavailable extension now instead of waiting out its backoff.
+Answers 200 with `{ "ok": true }` or `{ "ok": false, "error": ... }`.
+
+### `GET /api/extensions/batch`
+
+The export: one TOML document holding the named extensions (`?names=a,b`), or
+every stored one when no names are given. A name that no longer resolves is
+skipped rather than failing the download, so a selection captured in a stale tab
+still exports what remains.
+
+```toml
+[[extensions]]
+name = "docs"
+kind = "skill"
+target = "internal"
+paths = ["~/skills/docs/"]
+```
+
+### `POST /api/extensions/batch`
+
+The import: a document in exactly the shape the export produces. Every entry is
+validated before anything is written, so an invalid file imports nothing. Names
+already in use are renamed rather than overwritten — up to the first free
+`-N` suffix — and the response lists them:
+
+```
+Response 201: { "imported": 2, "renamed": [ { "from": "docs", "to": "docs-2" } ] }
+```

@@ -41,18 +41,21 @@ Termcp 的 31 个工具按"热路径 / 低频面"分成两类。MCP 标准的 `d
 - **核心常驻**（永远不标记）：`session_start` / `session_list` / `session_info` / `session_terminate` / `session_delete` / `shell_open` / `shell_list` / `shell_close` / `shell_input` / `shell_key` / `shell_output` / `notify_user`。这些构成"开会话 → 打字 → 读输出"的主循环，若需先搜索才能用，每次交互都要多一个来回——**开启懒加载时它们依然立即可见**。
 - **低频宽面**（19 个，`--mcp-defer-tools` 下才标记）：11 个 SFTP 文件工具、`forward`、`shell_resize` / `shell_detect` / `shell_notify` / `shell_reader_register` / `shell_reader_unregister`、`message`、`ssh_config`。这些工具参数面宽、调用频率低，客户端可按需检索后再拉取 Schema，节省每轮注入的上下文预算。
 
-### 两种模式
+### 三级开关（`--mcp-defer-tools-level`）
 
-| 模式 | `tools/list` 行为 |
+| 级别 | `tools/list` 行为 |
 |------|------------------|
-| **默认** | 31 个工具全部返回完整 Schema，不打 `defer_loading` |
-| **`--mcp-defer-tools`** | 12 个核心工具完整返回；19 个低频工具带 `defer_loading: true` |
+| **`off`（默认）** | 31 个工具全部返回完整 Schema，不打 `defer_loading` |
+| **`partial`** | 12 个核心工具完整返回；19 个低频工具带 `defer_loading: true`。等价于旧布尔开关 `--mcp-defer-tools` |
+| **`all`** | 只保留最小驱动环 4 个（`session_start` / `shell_input` / `shell_key` / `shell_output`）常驻，其余 27 个全部带 `defer_loading: true`——为支持按需拉取的客户端压出最小的首次上下文 |
 
-两种模式都是**同样 31 个工具**，开关从不删除工具，只影响首次列表是否附带 Schema。
+三种模式都是**同样 31 个工具**，开关从不删除工具，只影响首次列表是否附带 Schema。旧布尔开关 `--mcp-defer-tools` 仍然可用（等价 `partial`）；`--mcp-defer-tools-level` 设置后优先。
 
 默认关闭的原因很实际：不认识 `defer_loading` 的客户端、或经网关转发而被丢弃标记的链路（实测 **Codex 0.155.1 经 AxonHub** 会把带标记的工具整个吞掉，模型侧看到"零工具"），会让这些工具**从模型视野里直接消失**，而不是"稍后能搜到"。只有确认客户端支持按需拉取（mcp-go 系、Claude Code）时才建议开启。
 
-分类由 `internal/mcp/toolopts.go` 的 `deferredTools` 表定义，开关由 `Server.shouldDeferTool` 决定（`mcp.DeferTools()` option）；`TestDeferLoadingPolicy` 会分别校验两种模式，并拦住"新工具未分类"与"僵尸条目"。若要调整分类，改表即可，无需改各处注册代码。
+分类由 `internal/mcp/toolopts.go` 的 `deferredTools` 表与 `allLevelCore` 表定义，开关由 `Server.shouldDeferTool` 按级别决定（`mcp.DeferLevel(level)` option）；`TestDeferLoadingPolicy` 会分别校验三种级别，并拦住"新工具未分类"与"僵尸条目"。若要调整分类，改表即可，无需改各处注册代码。
+
+另见：完整的工具参考本来就以 MCP resource 形式随实例提供（`resources/list` 里的 `api.md` / `skills.md`），instructions 的规则 0 已指向它——这正是 #95 "提示放资源展开"的落点：`tools/list` 只带紧凑描述，深度文档按需取。
 
 **ID 规则（硬）：**
 
@@ -110,6 +113,7 @@ Termcp 的 31 个工具按"热路径 / 低频面"分成两类。MCP 标准的 `d
 | `rule_not_found` | 无此通知规则 rule_id | 用 `shell_notify(action=list)` 复核 |
 | `conflict` | 资源已存在 | 改用 edit/其它名称 |
 | `not_configured` | 功能未启用/未初始化 | 检查服务启动参数 |
+| `forbidden` | 该调用不在会话模板的 `allow`/`paths` 白名单内（extension 会话） | **不要重试**：用 `extension(action=get)` 看模板允许什么 |
 | `connection_failed` | SSH 拨号/连接失败 | 检查网络与目标地址 |
 | `operation_failed` | 其它操作失败 | 查看 `error` 详情 |
 | `internal_error` | 服务端内部错误 | 查看服务端日志 |
@@ -151,14 +155,14 @@ ssh_config(action=list)
 |------|------|------|------|------|
 | `command` | string | 否 | — | 可执行文件；空 = 按**命令优先级链**解析：profile 的 `default_shell` → （仅 pty）目标机自己的登录 shell。`pipe` + 空命令且 profile 无 `default_shell` 会被拒绝：pipe 通道没有登录 shell 可申请，客户端也不会拿本机 PATH 去猜目标机的 shell |
 | `args` | string[] | 否 | `[]` | 命令行参数，仅 `command` 非空时有效 |
-| `mode` | string | 否 | `"pty"` | **首个 shell** 的模式：`"pty"` 或 `"pipe"`。模式属于 shell，不属于会话；后续 shell 的 mode 由 `shell_open` 决定 |
+| `mode` | string | 否 | `"pty"` | **首个 shell** 的模式：`"pty"` 或 `"pipe"`。模式属于 shell，不属于会话；后续 shell 的 mode 由 `shell_open` 决定。pty 会**回显输入**（Windows 上无法关闭）；机器行协议（JSONL）请用 `pipe`（无回显） |
 | `on_exit` | string | 否 | `"keep"` | 最后一个 shell **自行结束**（`exit`、一次性命令跑完）时会话怎么处理：`"keep"` 保留为运行会话（可继续复用连接：转发/SFTP/新开 shell）；`"close"` 关闭会话并进归档。一次性命令用 `"close"`，否则它会一直留在运行列表里。两种取值下输出都仍可用 `shell_output` 读取 |
 | `name` | string | 否 | ssh_config | 会话显示名称 |
 | `rows` | number | 否 | `24` | 初始 PTY 行数（1–1000） |
 | `cols` | number | 否 | `80` | 初始 PTY 列数（1–1000） |
-| `ssh_config` | string | **是** | — | profile 名称：`"internal"` = 本机 loopback，其他 = `ssh_configs/<name>/` 下的远端连接（可用 `ssh_config(action=list)` 查询） |
+| `ssh_config` | string | **是** | — | profile 名称：`"internal"` = termcp 宿主机自己的**本地终端**（完整 shell 控制，不走 SSH；要操作本机就用它，不要以为自己只能 SSH 远端），其他 = `ssh_configs/<name>/` 下的远端连接（可用 `ssh_config(action=list)` 查询） |
 
-**返回**：`{ session_id, shell_id, ssh_config, index }`（`index` = 主 shell 的频道编号，恒为 1）
+**返回**：`{ session_id, shell_id, ssh_config, index, stderr }`（`index` = 主 shell 的频道编号，恒为 1；`stderr` = `"merged(pty)"` 或 `"separate"`——后者表示 `shell_output(stream="e")` 能取到 stderr 字节）
 
 ### shell_open
 
@@ -169,11 +173,12 @@ ssh_config(action=list)
 | `session_id` | string | **是** | — | 父会话 ID |
 | `name` | string | 否 | — | 子通道显示名 |
 | `command` | string | 否 | — | **可执行文件**（非命令行）；空 = 按**命令优先级链**解析：profile 的 `default_shell` → （仅 pty）目标机自己的登录 shell。`pipe` + 空命令且 profile 无 `default_shell` 会被拒绝。传 `"ls -la"` 会被当成单个文件名报 `executable file not found`，应传 `command="ls"` + `args=["-la"]` |
-| `mode` | string | 否 | `"pty"` | 本 shell 通道的模式：`"pty"` 或 `"pipe"`（`"pipe"` = 无 TTY、逐行、运行即退出的命令）。模式是 shell 级属性，同一个会话可以同时挂 pty 与 pipe shell |
+| `args` | string[] | 否 | — | 命令参数（argv，与 `command` 配对，同 `session_start`）。command 与 args 直传 argv，**不做 shell 拼接**；`command="node"` + `args=["app.js","stream"]` = `node app.js stream` |
+| `mode` | string | 否 | `"pty"` | 本 shell 通道的模式：`"pty"` 或 `"pipe"`（`"pipe"` = 无 TTY、**无回显**、逐行、运行即退出的命令——JSONL 等机器行协议走 pipe；pty 会回显输入，**Windows 上无法关闭**）。模式是 shell 级属性，同一个会话可以同时挂 pty 与 pipe shell |
 | `rows` | number | 否 | `24` | PTY 行数 |
 | `cols` | number | 否 | `80` | PTY 列数 |
 
-**返回**：`{ shell_id, session_id, name, index }`（`index` = 该频道的编号，即 `termcp://#<会话id>:<index>` 里的 N）
+**返回**：`{ shell_id, session_id, name, index, stderr }`（`index` = 该频道的编号，即 `termcp://#<会话id>:<index>` 里的 N；`stderr` = `"separate"`（pipe）/ `"merged(pty)"`）
 
 ### shell_list
 
@@ -201,6 +206,12 @@ ssh_config(action=list)
 |------|------|------|------|------|
 | `shell_id` | string | **是** | — | |
 | `text` | string | **是** | — | UTF-8 文本（不自动追加换行） |
+
+**返回**：`{ success, offset, total_lines, line }`（行协议驱动的关键返回值）
+
+- `offset`：**提交那一刻的流末尾**——本次输入的回显将从这个位置开始写入（pty 靠回显进流；pipe 无回显，这个位置只有 log.jsonl 的零长度 `a`/`i` mark）。拿到它就能：用 `shell_output(offset=…)` 读"这次输入之后发生了什么"，或在 `message(action=list)` 里定位它落进哪个 status span。
+- `total_lines`：提交时的完整行数；`line`：按零长度位置语义（与 message spans 一致）——回显将续写的行号，流正好结束在行边界时为 `0`（回显将成为 `total_lines+1` 行，完成后经 `message` 可查）。
+- 时序提醒：pty 回显是异步的，`offset` 之后可能有进程输出插队；把 `offset` 当"提交位置"用，不要当"回显精确起点"断言。审阅模式（review pending）返回等待审阅的文本回复，无 offset——什么都没写入。
 
 ### shell_key
 
@@ -242,23 +253,29 @@ ssh_config(action=list)
 | `timeout` | number | 否 | `3` | 仅活会话：阻塞等待秒数（0–60）；0 = 非阻塞；多 shell 轮询建议 ≤3 |
 | `offset` | number | 否 | `-1` | 无状态字节游标：从该原始字节位置向后读；-1 = 默认模式（见下） |
 | `tail_lines` | number | 否 | `0` | 只返回流末尾最后 N 行（优先于 offset）；0 = 关闭 |
+| `from_line` | number | 否 | `0` | 按行号读取：从第 N 行（1-based，绝对行号，来自 `log.lines` 索引）读整行；与 `offset`/`tail_lines`/`reader_id` 互斥；0 = 关闭 |
+| `stream` | string | 否 | `"all"` | 按底层流过滤返回字节：`"all"` 全部（默认）/ `"o"` 仅 stdout / `"e"` 仅 stderr。**offset 永远指原始流**——`start_offset`/`end_offset`/`total_bytes`/`raw_bytes` 不因过滤改变，只有返回内容（`bytes_returned`）变小。pty 在源头合流 stderr，`"e"` 恒为空、`"o"` 等价 `"all"`；一行跨 o/e 边界时过滤读把它拆成多段拼接，不丢字节 |
 | `max_lines` | number | 否 | `0` | 最多返回 N 个完整行（窗口内裁切）；0 = 无限制 |
 | `max_bytes` | number | 否 | `8192` | 单次返回最大原始字节数；0 = 无限制 |
 | `reader_id` | number | 否 | `0` | 仅活会话流式游标；已关闭会话不支持 |
 
-**读取模式（三选一）**：
+**读取模式（四选一）**：
 
 1. **流式游标（默认，活会话）**：返回 reader 上次读取后的新输出，游标前移、不重复。`shell_input → shell_key(enter) → shell_output` 是驱动一条命令的完整循环（上一步的类型、回车、读取只是工具语义，不是回合边界）——应在同一轮内批处理：一个 `mcpScript` 里打字、回车、然后轮询到匹配或到期再返回。每次微步骤（打字/回车/读取各占一个模型回合）会让每个微步骤多付出 ~6–9s 的回合开销，而单次工具调用只要 2–10ms。
 2. **`offset >= 0`（无状态绝对定位）**：读字节区间 `[offset, offset+max_bytes)`。任意时刻从头/任意位置翻页；每次调用显式传 `offset`（用返回的 `end_offset` 续读），服务器不保存状态，活会话与已关闭会话一视同仁。
 3. **`tail_lines > 0`（末尾截取）**：反向取流末尾最后 N 行——只读最近输出，绝不拖入整段历史（token 友好）。无 `offset`/`tail_lines` 且目标是已关闭/死亡会话时，默认也取末尾最近一块（≤8 KiB），不会全量导出。
+4. **`from_line > 0`（按行号读取）**：从持久化日志的第 N 行读起（配合 `max_lines`/`max_bytes`）。行号建在 `log.lines` 索引上：**1-based、绝对、永不平移**（`log.bin` 只追加不淘汰），活会话与已关闭会话同一套行号，第 N 行永远是同样的字节；末尾未满一行（无 `\n` 收尾）不占行号。适合 JSONL 等行协议消费方按行拉增量（配合 `shell_notify` 唤醒后 `from_line=上次读到+1`）。
 
-**返回**：`{ output, has_more, lines_returned, bytes_returned, start_offset, end_offset, total_bytes, source, session_id, shell_id, session_status, session_uptime_seconds? }`
+**返回**：`{ output, has_more, lines_returned, bytes_returned, returned_bytes, raw_bytes, start_offset, end_offset, total_bytes, partial_tail_bytes, source, session_id, shell_id, session_status, session_uptime_seconds? }`；`from_line` 读取额外返回 `{ from_line, to_line, total_lines, line_bytes }`。
 
-- `start_offset` / `end_offset`：本次返回的原始字节区间；`total_bytes`：流总长；`has_more = end_offset < total_bytes`。
+- `start_offset` / `end_offset`：本次返回的**原始字节**区间；`total_bytes`：流总长；`has_more = end_offset < total_bytes`。
+- **字节口径**：所有 offset/字节数字段都描述原始字节流；`raw_bytes` 是原始窗口字节数（`start_offset + raw_bytes == end_offset` 恒成立），`bytes_returned`/`returned_bytes` 是**清洗后**文本长度——`strip_ansi` 剥掉了东西时两者必不相等。**游标只按 `end_offset`（或 `raw_bytes`）推进，禁止用 `bytes_returned` 推进**，否则有 ANSI 时会永久错位。
+- **`partial_tail_bytes`**：本次窗口末尾跟在最后一个 `\n` 之后的原始字节数（0 = 正好结束在行边界）。行协议消费方必须把它扣住不解析，等下一读拼成完整行再处理。
+- `from_line` / `to_line`：本次返回覆盖的行号范围；`total_lines`：流中完整行总数；`line_bytes`：每个返回行的原始字节长度（应对 MB 级单行，避免整行拉回才能定位）。
 - `source`：`"live"`（内存缓冲）或 `"persisted"`（磁盘消息流）。
 - 活会话流式读（模式 1）时 `start_offset`/`end_offset` 反映 reader 游标位置。
 
-> 例：只读已关闭会话最后 10 行 → `shell_output(shell_id=已关闭session_id, tail_lines=10)`；从头翻页 → `shell_output(shell_id, offset=0, max_bytes=8000)` 后用 `end_offset` 续读。
+> 例：只读已关闭会话最后 10 行 → `shell_output(shell_id=已关闭session_id, tail_lines=10)`；从头翻页 → `shell_output(shell_id, offset=0, max_bytes=8000)` 后用 `end_offset` 续读；按行拉增量 → `shell_output(shell_id, from_line=上一读的 to_line+1)`。
 
 ### session_list
 
@@ -414,9 +431,10 @@ ssh_config(action=list)
 | `session_id` | string | **是** | 会话 ID（省略 `shell_id` 时解析到该会话的 primary shell） |
 | `shell_id` | string | 否 | 指定 shell 通道；省略则用会话的 primary shell |
 
-- `action="list"`：返回 `{ "spans": [{ status, time, start, end }], "total_bytes": N, "session_id": "..." }`
-- `status` = **这段字节是谁产生的**，共 5 个取值：`"o"` 输出（shell 自己打印的）、`"a"` AI 输入（MCP）、`"i"` 终端输入（人，经 Web UI）、`"q"` 此处请求了一次审批、`"A"` 审批通过并写入。**Agent 与人的敲键回显完全一样**，字节日志里分不出人是否操作过；`i` / `q` 区段就是「人碰过这个终端」的证据（`q` 后面不一定有字节：审批被拒/超时就不产生任何输入）。
+- `action="list"`：返回 `{ "spans": [{ status, time, start, end, from_line, to_line }], "total_bytes": N, "total_lines": N, "session_id": "..." }`
+- `status` = **这段字节是谁产生的**（业务语义：谁在操作；不含 stdout/stderr 之分——`o` 同时覆盖两者，流的归属用 `shell_output(stream=)` 读），共 5 个取值：`"o"` 输出（shell 自己打印的）、`"a"` AI 输入（MCP）、`"i"` 终端输入（人，经 Web UI）、`"q"` 此处请求了一次审批、`"A"` 审批通过并写入。**Agent 与人的敲键回显完全一样**，字节日志里分不出人是否操作过；`i` / `q` 区段就是「人碰过这个终端」的证据（`q` 后面不一定有字节：审批被拒/超时就不产生任何输入）。
 - `start`/`end`：该区段在 `log.bin` 中的字节区间；取内容用 `shell_output(shell_id, offset=start, max_bytes=end-start)`
+- `from_line`/`to_line`：该区段覆盖的**行号**（绝对、1-based，与 `shell_output(from_line=...)` 同一套编号）。区段在行中间结束时 `to_line < from_line`（未完成任何完整行）；零长度标记（输入）报告它所在的行；落在末尾半行/流起始/越过末尾的位置报告 0。
 - 输入是**零长度标记**（`start == end`）：按键已由终端回显进输出流，不重复写入；且标记的是**提交那一行**（按 enter / ctrl+c / ctrl+d / ctrl+z）的时刻，不是开始打字的时刻
 
 ### session_delete（彻底删除会话）
@@ -434,6 +452,32 @@ ssh_config(action=list)
 ---
 
 ## 服务端发现与配置
+
+### extension（扩展层统一入口）
+
+带 capability 白名单的**常驻会话**：一个存下来的模板（对着哪个 ssh_config、跑什么命令、哪些工具/路径允许），reconciler 把它保持可用并把 `session_id`/`shell_id` 交给 agent。同一个 host 上白名单相同的扩展共享**一条连接**，各自驱动自己那条 channel。完整说明见 resource `extensions.md`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `action` | string | **是** | `list` / `get` / `create` / `update` / `delete` / `retry` |
+| `name` | string | 条件 | 除 list 外都必填（`[A-Za-z0-9_-]`，最长 64） |
+| `kind` | string | 否 | create：`mcp`（stdio MCP server，pipe shell）/ `skill`（只读文件窗口，无 shell）/ `prompt`（交互终端）/ `custom`；决定未传字段的预设值 |
+| `target` | string | 否 | create 必填：ssh_config profile 名，或 `internal`（本机 loopback） |
+| `mode` | string | 否 | `pty` / `pipe`；`skill` 留空 = **不要 shell**（只有 SFTP 与转发） |
+| `command` / `args` | string / array | 否 | pipe 或一次性命令跑什么。pipe 没有登录 shell 可回退，因此 `mode=pipe` 必须给 `command` |
+| `allow` | array | 否 | 工具白名单。**空 = 不限制**；列了就是该会话能接受的完整集合 |
+| `paths` | array | 否 | 文件工具可触及的路径：前缀（`/srv/app/`）、glob（`*.md`）或正则（`re:^/srv/(app\|logs)/`）。`kind=skill` 至少一条。`local_path`（下载到本机的路径）也走这张表 |
+| `notes` | string | 否 | 给 agent 看的操作说明，`action=get` 会返回；第一次驱动前读它 |
+| `enabled` | bool | 否 | false = 停用：会话被拆掉，不再重连 |
+| `forwards` | array | 否 | 声明的隧道（`kind` = `dynamic` / `local` / `remote`），随会话建立与拆除 |
+| `rows` / `cols` | number | 否 | pty 尺寸，默认 24×80 |
+| `description` | string | 否 | 卡片上的一句话说明 |
+
+**update 的补丁语义**：**省略**的字段保持原值，**空数组**清空它——「把路径表缩短」与「不动路径表」因此是两次不同的调用。**类型不对的值直接拒绝**（不是静默忽略）：`allow`/`paths` 回退到「不修改」等于**清空**，而空 `allow` 恰恰是「不限制」，于是一个手误把会话放开了而不是收紧了。
+
+**返回**：`list` 给每个扩展的 `status`（`available` / `probing` / `unavailable` / `disabled`）以及可用时的 `session_id`/`shell_id`，不可用时给 `last_failure` 与 `next_retry`；`get` 给完整模板 + `failures` 历史 + `notes`。
+
+**驱动**：可用的扩展就是普通会话——`shell_input`/`shell_key`/`shell_output` 走它的 `shell_id`，`file_read`/`file_stat` 走 `session_id`。模板没列入的调用会被**真的拒绝**（`forbidden`，不是临时故障）：不要重试，也不要找绕道。扩展会话是基础设施，`session_list` 不列、Web UI 有独立一列，**不要 terminate/delete**（一条连接可能服务多个扩展）。
 
 ### shell_detect
 
@@ -524,8 +568,20 @@ password = "placeholder2"
 | `file_delete` | 删除文件或空目录 |
 | `file_rename` | 移动/重命名 |
 | `file_mkdir` | 创建目录（含父目录） |
-| `file_urls` | 获取 HTTP 下载/上传 URL |
+| `file_urls` | 获取 HTTP 下载/上传 URL（可指定下载响应的 header） |
 | `file_getwd` | SFTP 工作目录（不是 shell 的 `pwd`） |
+
+### file_urls
+
+返回 `{ download_url, upload_url, session_id, remote_path }`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `session_id` | string | **是** | |
+| `remote_path` | string | **是** | 要下载/上传的远端路径 |
+| `response_headers` | object | 否 | 下载时响应必须带的 header，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}` |
+
+`response_headers` 被拼进 `download_url` 的 query（`?h.<Name>=<value>`，见 `docs/api.md`），所以**谁打开这个 URL 都会带上它** —— curl、浏览器、别人转发的链接，不需要额外约定一个通道传 header。名字不是合法 HTTP token、值不是字符串、或值里带换行会被拒（header 注入）；`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端，请求了也会被丢弃，其馀同名 header 覆盖服务端默认值（例如请求的 `Content-Disposition` 覆盖服务端本来是 `attachment; filename=` 的那个）。
 
 ### 低频操作：分组入口（action 枚举）
 

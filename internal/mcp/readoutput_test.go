@@ -6,6 +6,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/open-mcp-ai/termcp/internal/session"
+	"github.com/open-mcp-ai/termcp/internal/transcript"
 )
 
 // shell_output is one tool with three read forms, and the split into
@@ -24,19 +25,19 @@ func TestParseReadParamsDefaults(t *testing.T) {
 	if bad != nil {
 		t.Fatalf("empty arguments were rejected: %s", bad.Content[0].(mcpgo.TextContent).Text)
 	}
-	if !p.stripAnsi {
+	if !p.StripAnsi {
 		t.Error("strip_ansi defaults to true: raw ANSI escapes are not what a caller wants by default")
 	}
-	if p.timeout != 3.0 {
-		t.Errorf("timeout = %v, want 3", p.timeout)
+	if p.Timeout != 3.0 {
+		t.Errorf("timeout = %v, want 3", p.Timeout)
 	}
-	if p.maxBytes != 8192 {
-		t.Errorf("max_bytes = %d, want 8192", p.maxBytes)
+	if p.MaxBytes != 8192 {
+		t.Errorf("max_bytes = %d, want 8192", p.MaxBytes)
 	}
-	if p.offset != -1 {
-		t.Errorf("offset = %d, want -1: -1 is what means \"no positional read\"", p.offset)
+	if p.Offset != -1 {
+		t.Errorf("offset = %d, want -1: -1 is what means \"no positional read\"", p.Offset)
 	}
-	if p.tailLines != 0 || p.maxLines != 0 || p.readerID != 0 {
+	if p.TailLines != 0 || p.MaxLines != 0 || p.ReaderID != 0 {
 		t.Errorf("zero values not preserved: %+v", p)
 	}
 }
@@ -58,7 +59,7 @@ func TestParseReadParamsValues(t *testing.T) {
 	if bad != nil {
 		t.Fatalf("valid arguments were rejected: %s", bad.Content[0].(mcpgo.TextContent).Text)
 	}
-	want := readParams{stripAnsi: false, timeout: 1.5, maxLines: 7, maxBytes: 1234, readerID: 9, offset: 42, tailLines: 3}
+	want := readParams{StripAnsi: false, Timeout: 1.5, MaxLines: 7, MaxBytes: 1234, ReaderID: 9, Offset: 42, TailLines: 3}
 	if p != want {
 		t.Errorf("parsed %+v, want %+v", p, want)
 	}
@@ -102,10 +103,10 @@ func TestParseReadParamsRanges(t *testing.T) {
 // which is the normal way to consume output, so the shape is worth asserting
 // rather than assuming.
 func TestOutputWindowResultShape(t *testing.T) {
-	src := &outputSource{sessID: "s1", shellID: "sh1"}
-	w := outputWindow{output: "one\ntwo\n", start: 10, end: 18, total: 40, hasMore: true}
+	src := &transcript.Source{SessID: "s1", ShellID: "sh1"}
+	w := transcript.Window{Output: "one\ntwo\n", Start: 10, End: 18, Total: 40, HasMore: true}
 
-	got := w.result(src)
+	got := windowResult(w, src)
 
 	for _, key := range []string{
 		"output", "has_more", "lines_returned", "bytes_returned",
@@ -127,8 +128,8 @@ func TestOutputWindowResultShape(t *testing.T) {
 	if got["has_more"] != true {
 		t.Errorf("has_more = %v, want true", got["has_more"])
 	}
-	if got["source"] != SourcePersisted {
-		t.Errorf("source = %v, want %q: a nil live shell is a persisted stream", got["source"], SourcePersisted)
+	if got["source"] != "persisted" {
+		t.Errorf("source = %v, want %q: a nil live shell is a persisted stream", got["source"], "persisted")
 	}
 	if got["session_id"] != "s1" || got["shell_id"] != "sh1" {
 		t.Errorf("stream identity lost: %v/%v", got["session_id"], got["shell_id"])
@@ -142,13 +143,13 @@ func TestOutputWindowResultShape(t *testing.T) {
 // source rather than the window: uptime only means something while the shell is
 // alive, so a persisted read must not claim it.
 func TestOutputWindowResultLiveAddsUptime(t *testing.T) {
-	live := &outputSource{live: &session.ChildShell{}, sessID: "s1", shellID: "sh1", created: 0}
-	got := outputWindow{output: "x"}.result(live)
+	live := &transcript.Source{Live: &session.ChildShell{}, SessID: "s1", ShellID: "sh1", Created: 0}
+	got := windowResult(transcript.Window{Output: "x"}, live)
 	if _, ok := got["session_uptime_seconds"]; !ok {
 		t.Error("a live source must report session_uptime_seconds")
 	}
-	if got["source"] != SourceLive {
-		t.Errorf("source = %v, want %q", got["source"], SourceLive)
+	if got["source"] != "live" {
+		t.Errorf("source = %v, want %q", got["source"], "live")
 	}
 }
 
@@ -157,7 +158,7 @@ func TestOutputWindowResultLiveAddsUptime(t *testing.T) {
 // result with zero counts, not an error: a caller polling an idle shell would
 // otherwise have to treat "nothing yet" as a failure.
 func TestOutputWindowResultEmptyHasZeroCounts(t *testing.T) {
-	got := outputWindow{}.result(&outputSource{sessID: "s", shellID: "sh"})
+	got := windowResult(transcript.Window{}, &transcript.Source{SessID: "s", ShellID: "sh"})
 
 	if got["output"] != "" {
 		t.Errorf("output = %q, want empty", got["output"])

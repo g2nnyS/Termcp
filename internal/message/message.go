@@ -87,18 +87,32 @@ func (m *Manager) ForgetSession(sessionID string) {
 	v.(*sessionWriter).stop()
 }
 
-// AppendOutput appends shell output to its byte log and returns the absolute
+// AppendOutput appends shell stdout to its byte log and returns the absolute
 // offset the bytes were written at.
 //
 // This is the one place a byte's position is established. Callers use the
 // returned offset to verify their own view of the stream, so a byte cannot be
 // counted by one component and missed by another without being detected.
 func (m *Manager) AppendOutput(sessionID, shellID string, data []byte) (int64, error) {
+	return m.AppendStream(sessionID, shellID, data, storage.StdioOut)
+}
+
+// AppendStderr appends shell stderr to the same byte log, telling the stream
+// index (log.stdio) that these bytes came from the error pipe. The bytes land
+// in log.bin exactly like stdout - one stream, one offset space - only the
+// switch index distinguishes them, so a reader can filter either stream while
+// cursors and offsets keep a single meaning.
+func (m *Manager) AppendStderr(sessionID, shellID string, data []byte) (int64, error) {
+	return m.AppendStream(sessionID, shellID, data, storage.StdioErr)
+}
+
+// AppendStream is the shared body of AppendOutput/AppendStderr.
+func (m *Manager) AppendStream(sessionID, shellID string, data []byte, stream storage.StdioStream) (int64, error) {
 	if m.store == nil || len(data) == 0 {
 		return 0, nil
 	}
 	w := m.writer(sessionID)
-	return w.append(shellID, data)
+	return w.appendStream(shellID, data, stream)
 }
 
 // AppendMarkOnly records a status change that produced no bytes (for example an

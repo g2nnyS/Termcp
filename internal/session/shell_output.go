@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -46,10 +47,18 @@ func (s *Session) ReadOutputForReader(ctx context.Context, readerID int, timeout
 
 // ReadTerminalStream reads PTY output for a reader without appending to the byte log (high-frequency UI streaming).
 // If maxBytes > 0, each call returns at most that many raw bytes (for WebSocket/SSE chunking); 0 means one full drain to end of buffer.
-func (s *Session) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, error) {
+//
+// The second return value is this read's RAW window (before any cleaning), so a
+// caller that needs to select bytes by producer - stream filtering - works from
+// the same read the cursor consumed; a cursor can only be read once. The third
+// is the raw stream's partial tail: how many bytes at the end of THIS read
+// follow the last '\n'. Both are properties of the raw window, computed before
+// any cleaning, so line-protocol consumers know whether the chunk they received
+// ends on a line boundary whatever stripping did to the text.
+func (s *Session) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, []byte, int64, error) {
 	cs := s.PrimaryShell()
 	if cs == nil {
-		return "", fmt.Errorf("session shell has exited")
+		return "", nil, 0, fmt.Errorf("session shell has exited")
 	}
 	return cs.ReadTerminalStream(ctx, readerID, timeout, stripAnsi, maxLines, maxBytes)
 }
@@ -145,17 +154,24 @@ func (cs *ChildShell) UnregisterReader(id int) {
 }
 
 // ReadTerminalStream reads PTY output for a reader without appending to the byte log.
-func (cs *ChildShell) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, error) {
+// The second return value is the raw window (before any cleaning) and the third
+// its partial tail (bytes after the last '\n' of this read); see the Session
+// wrapper above.
+func (cs *ChildShell) ReadTerminalStream(ctx context.Context, readerID int, timeout time.Duration, stripAnsi bool, maxLines int, maxBytes int) (string, []byte, int64, error) {
 	data, err := cs.buf.ReadLimited(ctx, readerID, timeout, maxBytes, maxLines)
 	if err != nil && err != io.EOF {
-		return "", err
+		return "", nil, 0, err
+	}
+	partial := int64(len(data))
+	if idx := bytes.LastIndexByte(data, '\n'); idx >= 0 {
+		partial -= int64(idx + 1)
 	}
 	output := string(data)
 	if stripAnsi {
 		output = ansi.Strip(output)
 		output = ansi.Compact(output)
 	}
-	return output, nil
+	return output, data, partial, nil
 }
 
 // HasMoreOutput returns whether the given reader has unread data.
@@ -212,14 +228,21 @@ func (cs *ChildShell) BufferLen() int64 {
 // the grace only covers a peer that never closes its channel.
 const pipeDrainGrace = 2 * time.Second
 
-// pipeToBuffer pipes child shell output into the buffer.
+// pipeToBuffer pipes one of a child shell's output streams into the buffer.
+//
+// The stream source (stdout or stderr) rides along so the transcript can tell
+// the two apart: the bytes land in the same log.bin either way - one stream,
+// one offset space - but the stream-switch index records where stderr begins
+// and ends, which is what lets a line-protocol consumer read stdout alone.
+// On a pty shell the stderr reader never delivers: the terminal merges stderr
+// at the source, so pty transcripts simply have no stderr ranges.
 //
 // The loop runs until the reader reports an error (normally io.EOF once the
 // channel is closed after the process exits). It must NOT stop on cs.done: the
 // SSH session reports exit-status as soon as the process is gone, while the
 // trailing stdout may still be sitting unread in the channel buffer — bailing
 // out on cs.done truncated the tail of fast commands.
-func (cs *ChildShell) pipeToBuffer(r io.Reader) {
+func (cs *ChildShell) pipeToBuffer(r io.Reader, stderr bool) {
 	p := cs.parent
 	if p != nil {
 		p.doneWG.Add(1)
@@ -247,7 +270,13 @@ func (cs *ChildShell) pipeToBuffer(r io.Reader) {
 				// data.
 				var werr error
 				if p != nil && p.msgMgr != nil {
-					off, lerr := p.msgMgr.AppendOutput(p.ID, cs.ID, chunk)
+					var off int64
+					var lerr error
+					if stderr {
+						off, lerr = p.msgMgr.AppendStderr(p.ID, cs.ID, chunk)
+					} else {
+						off, lerr = p.msgMgr.AppendOutput(p.ID, cs.ID, chunk)
+					}
 					if lerr != nil {
 						// A failed append means the durable log did not take these bytes.
 						// Keeping them only in memory would create exactly the drift this
@@ -324,8 +353,8 @@ func (cs *ChildShell) retainHistory(p *Session) {
 
 // startChildReaders starts the stdout/stderr pipe goroutines and exit watcher for a child shell.
 func (cs *ChildShell) startReaders() {
-	cs.pipeToBuffer(cs.execSession.Stdout)
-	cs.pipeToBuffer(cs.execSession.Stderr)
+	cs.pipeToBuffer(cs.execSession.Stdout, false)
+	cs.pipeToBuffer(cs.execSession.Stderr, true)
 
 	if p := cs.parent; p != nil {
 		p.watchWG.Add(1)

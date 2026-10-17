@@ -105,8 +105,8 @@ func TestShellLocatorIndexStableAcrossClose(t *testing.T) {
 	if bad != nil {
 		t.Fatalf("shell_output :3 failed: %s", bad.Content[0].(mcpgo.TextContent).Text)
 	}
-	if src.shellID != third {
-		t.Fatalf("shell_output :3 read shell %q, want %q", src.shellID, third)
+	if src.ShellID != third {
+		t.Fatalf("shell_output :3 read shell %q, want %q", src.ShellID, third)
 	}
 
 	_, _ = s.handleTerminateSession(context.Background(), makeRequest(map[string]any{
@@ -170,11 +170,11 @@ func TestShellLocatorResolvesAgainstLiveSetNotSnapshot(t *testing.T) {
 	if bad != nil {
 		t.Fatalf("shell_output :2 failed: %s", bad.Content[0].(mcpgo.TextContent).Text)
 	}
-	if src.live == nil {
-		t.Fatalf(":2 resolved through the persisted snapshot for a session with live shells (shellID=%s)", src.shellID)
+	if src.Live == nil {
+		t.Fatalf(":2 resolved through the persisted snapshot for a session with live shells (shellID=%s)", src.ShellID)
 	}
-	if src.shellID != second {
-		t.Fatalf(":2 read shell %q, want the live second channel %q", src.shellID, second)
+	if src.ShellID != second {
+		t.Fatalf(":2 read shell %q, want the live second channel %q", src.ShellID, second)
 	}
 
 	// The survivors keep the numbers they were created with, including the one
@@ -467,8 +467,8 @@ func TestShellOutputAcceptsLocator(t *testing.T) {
 		if bad != nil {
 			t.Fatalf("%s: %s", id, parseResult(t, bad)["error"])
 		}
-		if src.shellID != shellID {
-			t.Fatalf("%s: resolved shell %q, want %q", id, src.shellID, shellID)
+		if src.ShellID != shellID {
+			t.Fatalf("%s: resolved shell %q, want %q", id, src.ShellID, shellID)
 		}
 	}
 
@@ -506,7 +506,7 @@ func TestShellOutputAcceptsLocator(t *testing.T) {
 		}
 		// Terminated sessions retain their live in-memory buffer until explicit
 		// delete; output reading continues through the buffer without degradation.
-		if src.live == nil && src.msgMgr == nil {
+		if src.Live == nil && src.MsgMgr == nil {
 			t.Fatalf("closed %s: expected a valid output source", id)
 		}
 	}

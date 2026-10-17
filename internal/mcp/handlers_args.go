@@ -48,16 +48,24 @@ func successResult() *mcpgo.CallToolResult {
 }
 
 func getStringSlice(args map[string]any, key string) []string {
-	if v, ok := args[key]; ok {
-		if arr, ok := v.([]any); ok {
-			var result []string
-			for _, item := range arr {
-				if s, ok := item.(string); ok {
-					result = append(result, s)
-				}
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	switch arr := v.(type) {
+	case []any:
+		// The MCP wire shape: JSON decodes every array to []any.
+		var result []string
+		for _, item := range arr {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
 			}
-			return result
 		}
+		return result
+	case []string:
+		// Go-side callers (tests, handlers handed a ready-made argv). A silent
+		// nil here would look exactly like "the argument was dropped".
+		return arr
 	}
 	return nil
 }

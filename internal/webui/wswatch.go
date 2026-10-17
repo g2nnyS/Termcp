@@ -76,7 +76,7 @@ func (c *uiWS) runWatch(ctx context.Context, shell *session.ChildShell, sid stri
 				timeout = 0
 			}
 		}
-		out, err := shell.ReadTerminalStream(ctx, rid, timeout, false, 0, terminalOutputChunkBytes)
+		out, _, _, err := shell.ReadTerminalStream(ctx, rid, timeout, false, 0, terminalOutputChunkBytes)
 		if err != nil {
 			if ctx.Err() != nil {
 				return

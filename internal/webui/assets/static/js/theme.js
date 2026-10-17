@@ -60,11 +60,12 @@ function themeText(key) {
       case 'theme.dark': return t('theme.dark');
       case 'theme.auto': return t('theme.auto');
       case 'theme.cyberpunk': return t('theme.cyberpunk');
+      case 'theme.matrix': return t('theme.matrix');
     }
   }
   var overrides = _themeStrings.en;
   if (overrides && Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key];
-  var english = { 'theme.label': 'Theme', 'theme.loading': 'Loading themes…', 'theme.discoverFailed': 'Unable to load themes', 'theme.loadFailed': 'Theme could not be loaded', 'theme.light': 'Light', 'theme.dark': 'Dark', 'theme.auto': 'Auto', 'theme.cyberpunk': 'Cyberpunk' };
+  var english = { 'theme.label': 'Theme', 'theme.loading': 'Loading themes…', 'theme.discoverFailed': 'Unable to load themes', 'theme.loadFailed': 'Theme could not be loaded', 'theme.light': 'Light', 'theme.dark': 'Dark', 'theme.auto': 'Auto', 'theme.cyberpunk': 'Cyberpunk', 'theme.matrix': 'Matrix' };
   return english[key] || key;
 }
 
@@ -210,7 +211,7 @@ function restoreThemeResources(id) {
 }
 
 function themeLabel(id) {
-  var names = { 'default-light': 'theme.light', 'default-dark': 'theme.dark', 'auto': 'theme.auto', 'cyberpunk': 'theme.cyberpunk' };
+  var names = { 'default-light': 'theme.light', 'default-dark': 'theme.dark', 'auto': 'theme.auto', 'cyberpunk': 'theme.cyberpunk', 'matrix': 'theme.matrix' };
   return Object.prototype.hasOwnProperty.call(names, id) ? themeText(names[id]) : id;
 }
 
@@ -256,10 +257,10 @@ function discoverThemes() {
         if (validThemeChoice(id) && ids.indexOf(id) < 0) ids.push(id);
       } catch (e) {}
     });
-    var builtinOrder = ['default-light', 'default-dark', 'cyberpunk'];
+    var builtinOrder = ['default-light', 'default-dark', 'cyberpunk', 'matrix'];
     return ids.sort(function (a, b) {
       var ai = builtinOrder.indexOf(a), bi = builtinOrder.indexOf(b);
-      if (ai >= 0 || bi >= 0) return (ai < 0 ? 3 : ai) - (bi < 0 ? 3 : bi);
+      if (ai >= 0 || bi >= 0) return (ai < 0 ? builtinOrder.length : ai) - (bi < 0 ? builtinOrder.length : bi);
       return a.localeCompare(b);
     });
   });

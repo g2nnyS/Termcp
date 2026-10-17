@@ -40,7 +40,7 @@ func TestThemesDiscoveredAfterHandlerStarts(t *testing.T) {
 		return rr.Body.String()
 	}
 	before := listing()
-	for _, id := range []string{"cyberpunk", "default-light", "default-dark"} {
+	for _, id := range []string{"cyberpunk", "default-light", "default-dark", "matrix"} {
 		if !strings.Contains(before, `href="`+id+`/"`) {
 			t.Fatalf("missing built-in theme %s", id)
 		}
@@ -160,7 +160,7 @@ func TestThemeAssetsFallbackAndLegacyOverrides(t *testing.T) {
 
 func TestBuiltInThemeImportsResolve(t *testing.T) {
 	f := testThemeFS(t, t.TempDir(), "")
-	for _, id := range []string{"cyberpunk", "default-light", "default-dark"} {
+	for _, id := range []string{"cyberpunk", "default-light", "default-dark", "matrix"} {
 		entry, err := fs.ReadFile(f, "themes/"+id+"/theme.css")
 		if err != nil {
 			t.Fatal(err)
@@ -184,7 +184,7 @@ func TestBuiltInThemeImportsResolve(t *testing.T) {
 func TestBuiltInThemeCopyUsesCatalogKeysAndPlaceholders(t *testing.T) {
 	f := testThemeFS(t, t.TempDir(), "")
 	base := loadCatalogs(t)
-	for _, id := range []string{"default-light", "default-dark", "cyberpunk"} {
+	for _, id := range []string{"default-light", "default-dark", "cyberpunk", "matrix"} {
 		data, err := fs.ReadFile(f, "themes/"+id+"/strings.json")
 		if err != nil {
 			t.Fatal(err)
@@ -204,7 +204,7 @@ func TestBuiltInThemeCopyUsesCatalogKeysAndPlaceholders(t *testing.T) {
 				}
 			}
 		}
-		if strings.HasPrefix(id, "default-") {
+		if id != "cyberpunk" {
 			for lang, want := range map[string]string{"en": "Connections", "zh-Hans": "连接", "zh-Hant": "連線"} {
 				if got := catalog[lang]["nav.nethub"]; got != want {
 					t.Errorf("%s/%s title = %q, want %q", id, lang, got, want)
@@ -238,7 +238,7 @@ func TestBuiltInThemeCopyUsesCatalogKeysAndPlaceholders(t *testing.T) {
 
 func TestBuiltInTerminalThemeSettings(t *testing.T) {
 	f := testThemeFS(t, t.TempDir(), "")
-	for _, id := range []string{"default-light", "default-dark", "cyberpunk"} {
+	for _, id := range []string{"default-light", "default-dark", "cyberpunk", "matrix"} {
 		data, err := fs.ReadFile(f, "themes/"+id+"/theme.json")
 		if err != nil {
 			t.Fatal(err)

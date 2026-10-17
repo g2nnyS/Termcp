@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 900" preserveAspectRatio="xMidYMin slice" shape-rendering="crispEdges">
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path fill="none" stroke="#142a16" d="M32 0H0v32"/>
+      <path fill="#254529" d="M0 0h2v2H0z"/>
+    </pattern>
+    <pattern id="rain" width="128" height="224" patternUnits="userSpaceOnUse">
+      <g fill="#1f4720">
+        <path d="M8 8h8v8H8zm0 16h8v2H8zm2 16h4v8h-4zm-2 16h8v8H8zm0 16h8v2H8zm2 16h4v8h-4zM72 72h8v8h-8zm2 16h4v8h-4zm-2 16h8v2h-8zm0 16h8v8h-8zm2 16h4v8h-4zm-2 16h8v2h-8z"/>
+      </g>
+      <path fill="#48792b" d="M8 104h8v8H8zm64 64h8v8h-8z"/>
+    </pattern>
+  </defs>
+  <path fill="#050c06" d="M0 0h1440v900H0z"/>
+  <path fill="url(#grid)" d="M0 0h1440v900H0z"/>
+  <path fill="url(#rain)" opacity=".65" d="M0 0h1440v900H0z"/>
+</svg>

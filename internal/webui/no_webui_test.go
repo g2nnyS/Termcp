@@ -9,12 +9,12 @@ import (
 	"testing"
 )
 
-// The pure-API build carries the two agent documents and nothing else: no
+// The pure-API build carries the agent documents and nothing else: no
 // index.html, no static tree, no UI routes. A regression that re-embeds the
 // browser UI would show up here.
 func TestNoWebUIBuildCarriesDocsOnly(t *testing.T) {
 	fsys := Assets()
-	for _, want := range []string{"api.md", "skills.md"} {
+	for _, want := range []string{"api.md", "skills.md", "extensions.md"} {
 		if _, err := fs.Stat(fsys, want); err != nil {
 			t.Errorf("Assets() is missing %s: %v", want, err)
 		}

@@ -400,6 +400,25 @@ function showUiNotify(n) {
 }
 
 /** Display: strip leading session- from name, else use id */
+/** Download an opaque TOML document from an export route. The backend composes
+ *  the document (a selection, or everything), so the browser stays a pipe for
+ *  bytes: fetch, blob, hand it to the download machinery, release the URL. */
+function downloadTOML(path, filename) {
+  return fetch(path).then(function (r) {
+    if (!r.ok) return r.text().then(function (message) { throw new Error(message || String(r.status)); });
+    return r.blob();
+  }).then(function (blob) {
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  });
+}
+
 function displaySessionShort(s) {
   var id = String((s && s.id) || '').trim();
   var name = String((s && s.name) || '').trim();

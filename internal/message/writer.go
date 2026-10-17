@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/open-mcp-ai/termcp/internal/clock"
+	"github.com/open-mcp-ai/termcp/internal/storage"
 	"github.com/open-mcp-ai/termcp/pkg/api"
 )
 
@@ -48,6 +49,10 @@ type request struct {
 	shell string
 	// data, when non-nil, is appended.
 	data []byte
+	// stream says which low-level producer the data came from, so the store can
+	// maintain the stream-switch index (log.stdio). It rides every data append;
+	// status-only requests leave it at its zero value (stdout).
+	stream storage.StdioStream
 	// status, when true, records mark at the current end of the log.
 	status bool
 	mark   api.LogStatus
@@ -105,10 +110,17 @@ func newSessionWriter(m *Manager, sessionID string) *sessionWriter {
 	}
 }
 
-// append writes data at the end of the log and records a mark when the status
-// changed.
+// append writes stdout data at the end of the log and records a mark when the
+// status changed.
 func (w *sessionWriter) append(shellID string, data []byte) (int64, error) {
-	res := w.do(request{shell: shellID, data: data})
+	res := w.do(request{shell: shellID, data: data, stream: storage.StdioOut})
+	return res.offset, res.err
+}
+
+// appendStream writes data from a specific low-level producer (stdout or
+// stderr) at the end of the log.
+func (w *sessionWriter) appendStream(shellID string, data []byte, stream storage.StdioStream) (int64, error) {
+	res := w.do(request{shell: shellID, data: data, stream: stream})
 	return res.offset, res.err
 }
 
@@ -184,7 +196,7 @@ func (w *sessionWriter) run() {
 // handle performs one request. Runs on run's goroutine.
 func (w *sessionWriter) handle(req request) result {
 	if req.data != nil {
-		off, err := w.mgr.store.AppendLog(w.sessionID, req.shell, req.data)
+		off, err := w.mgr.store.AppendLog(w.sessionID, req.shell, req.data, req.stream)
 		if err != nil {
 			return result{err: err}
 		}

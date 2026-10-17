@@ -7,6 +7,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sftp"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
@@ -42,6 +43,23 @@ func filterRunning(in []api.Session) []api.Session {
 		if s.Status == api.SessionRunning {
 			out = append(out, s)
 		}
+	}
+	return out
+}
+
+// listableSessions is what a session list shows: the running sessions that belong
+// to the caller. A session in a namespace was created by a subsystem — the
+// extension layer keeps one per host — and is reached through that subsystem's own
+// handle (extension(action=list) hands out its session_id and shell_id) rather
+// than discovered in a list. Its id still resolves everywhere an id is accepted,
+// so a handle already in hand keeps working.
+func listableSessions(in []api.Session) []api.Session {
+	out := make([]api.Session, 0, len(in))
+	for _, s := range in {
+		if s.Status != api.SessionRunning || ns.Hidden(s.Namespace) {
+			continue
+		}
+		out = append(out, s)
 	}
 	return out
 }

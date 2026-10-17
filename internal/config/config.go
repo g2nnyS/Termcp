@@ -39,6 +39,7 @@ type Config struct {
 	AuthHash            string // salted SHA-256 token hash ($TERMCP_AUTH_HASH); generate with `termcp --gen-auth-hash`
 	DisableAuth         bool   // force HTTP authentication off (--disable-auth / $TERMCP_DISABLE_AUTH_TOKEN)
 	MCPDeferTools       bool   // opt-in: mark low-frequency MCP tools defer_loading; off lists every tool eagerly
+	MCPDeferToolsLevel  string // defer_loading level: off (default) | partial | all; overrides the bool flag
 }
 
 // Default returns a Config with sensible defaults.

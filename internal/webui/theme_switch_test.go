@@ -28,7 +28,7 @@ func TestThemeSwitchKeepsStateAndLatestChoice(t *testing.T) {
 	}
 	messages := map[string]json.RawMessage{}
 	configs := map[string]json.RawMessage{}
-	for _, id := range []string{"default-light", "default-dark", "cyberpunk"} {
+	for _, id := range []string{"default-light", "default-dark", "cyberpunk", "matrix"} {
 		messages[id] = json.RawMessage(readAssetLF(t, "themes/"+id+"/strings.json"))
 		configs[id] = json.RawMessage(readAssetLF(t, "themes/"+id+"/theme.json"))
 	}
@@ -73,6 +73,7 @@ function cssValue(k) {
   '--xterm-foreground': attrs['data-theme'] === 'default-dark' ? '#eeeeee' : '#223344',
   '--text-primary': attrs['data-theme'] === 'default-dark' ? '#eeeeee' : '#223344',
   '--bg-card': '#ffffff', '--font-mono': 'Baseline CJK Mono',
+  '--bg-input': '#061009', '--matrix-terminal-text': '#b6ff99',
   '--terminal-transparent': attrs['data-theme'] === 'cyberpunk' ? 'true' : 'false'
  };
  return (styles[k] || base[k] || '').replace(/var\((--[\w-]+)\)/g, (_, name) => cssValue(name));
@@ -118,7 +119,7 @@ const context = {
    if (id === 'invalid-json') throw Error('invalid JSON');
    return copies[id] || {};
  } }),
- DOMParser: class { parseFromString() { return { querySelectorAll: () => ['cyberpunk/', 'default-light/', 'default-dark/', 'custom%20theme/', '../', 'https://invalid/', 'not-a-folder'].map(href => ({ getAttribute: () => href })) }; } }
+ DOMParser: class { parseFromString() { return { querySelectorAll: () => ['cyberpunk/', 'default-light/', 'default-dark/', 'matrix/', 'custom%20theme/', '../', 'https://invalid/', 'not-a-folder'].map(href => ({ getAttribute: () => href })) }; } }
 };
 Object.assign(context.window, context);
 const fetchTheme = context.fetch;
@@ -134,7 +135,7 @@ vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), context);
  let dynamicLabel;
  context.onLangChange(() => { dynamicLabel = context.t('nethub.add'); });
  const ids = await context.discoverThemes();
- assert.deepEqual(Array.from(ids), ['default-light', 'default-dark', 'cyberpunk', 'custom theme']);
+ assert.deepEqual(Array.from(ids), ['default-light', 'default-dark', 'cyberpunk', 'matrix', 'custom theme']);
  assert.equal(context.themeLabel('constructor'), 'constructor');
  assert.equal(context.themeLabel('toString'), 'toString');
  const first = context.applyTheme('default-dark');
@@ -354,6 +355,31 @@ vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), context);
  assert.equal(links.length, 1, 'a pinned choice must not start a second stylesheet load when the OS flips');
  assert.equal(attrs['data-theme'], 'cyberpunk');
  assert.equal(storage['termcp.theme'], 'cyberpunk');
+
+ // Matrix updates live channels in place, retaining their output and CJK-safe
+ // mono metrics while the surrounding UI uses the bundled pixel font.
+ const matrix = context.applyTheme('matrix');
+ links[1].onload();
+ assert.equal(await matrix, true);
+ assert.equal(attrs['data-theme'], 'matrix');
+ assert.equal(storage['termcp.theme'], 'matrix');
+ assert.equal(context.themeLabel('matrix'), 'Matrix · 像素綠');
+ assert.equal(term.options.fontWeight, 700);
+ assert.equal(term.options.fontWeightBold, 900);
+ assert.equal(term.options.fontSize, 14);
+ assert.equal(term.options.fontFamily, 'Baseline CJK Mono');
+ assert.equal(term.options.allowTransparency, false);
+ assert.equal(term.options.theme.foreground, '#b6ff99');
+ assert.equal(term.options.theme.background, '#061009');
+ assert.equal(term.buffer, history);
+ assert.equal(win._channels, channels);
+ assert.equal(channels.a.term, term);
+ const afterMatrix = context.applyTheme('default-light');
+ links[1].onload();
+ assert.equal(await afterMatrix, true);
+ assert.equal(term.options.fontWeight, 'normal');
+ assert.equal(term.options.fontSize, 13);
+ assert.equal(term.buffer, history);
 
  // The same runtime works in the workbench and docs under a proxy mount.
  for (const page of ['https://app.example/', 'https://app.example/termcp/index.html', 'https://app.example/termcp/api.html']) {

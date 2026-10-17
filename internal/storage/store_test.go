@@ -35,7 +35,7 @@ func TestLog_OffsetIsFilePosition(t *testing.T) {
 	chunks := [][]byte{[]byte("AAAA"), []byte("BBBB"), []byte("CCCC")}
 	var want []byte
 	for _, c := range chunks {
-		off, err := st.AppendLog(sess, shell, c)
+		off, err := st.AppendLog(sess, shell, c, StdioOut)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,10 +89,10 @@ func TestLog_SplitMultiByteCharacterSurvives(t *testing.T) {
 
 	// Append the two halves as the reader would: a 4096-byte read that lands
 	// inside a character.
-	if _, err := st.AppendLog(sess, shell, first); err != nil {
+	if _, err := st.AppendLog(sess, shell, first, StdioOut); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog(sess, shell, second); err != nil {
+	if _, err := st.AppendLog(sess, shell, second, StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	// A window straddling the boundary must return the character whole.
@@ -122,19 +122,19 @@ func TestMarks_SpanToNextMarkAndTolerateTrailingGap(t *testing.T) {
 	st := newStore(t)
 	const sess, shell = "s3", "sh3"
 
-	if _, err := st.AppendLog(sess, shell, []byte("OUT1")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("OUT1"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AppendMark(sess, shell, api.LogMark{Status: api.LogOutput, Time: 1, Offset: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog(sess, shell, []byte("IN")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("IN"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AppendMark(sess, shell, api.LogMark{Status: api.LogAPIInput, Time: 2, Offset: 4}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog(sess, shell, []byte("OUT2")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("OUT2"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 
@@ -257,10 +257,10 @@ func TestMarks_OnDiskShapeUsesShortKeys(t *testing.T) {
 func TestLog_HandlesArePerShell(t *testing.T) {
 	st := newStore(t)
 
-	if _, err := st.AppendLog("sA", "sh1", []byte("a")); err != nil {
+	if _, err := st.AppendLog("sA", "sh1", []byte("a"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog("sB", "sh1", []byte("b")); err != nil {
+	if _, err := st.AppendLog("sB", "sh1", []byte("b"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteShell("sA", "sh1"); err != nil {
@@ -293,7 +293,7 @@ func TestMarks_WindowIsTheSpansDecidingIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := st.AppendLog(sess, shell, make([]byte, 400)); err != nil {
+	if _, err := st.AppendLog(sess, shell, make([]byte, 400), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 
@@ -416,7 +416,7 @@ func TestMarks_WindowAnswersTheSameAtEveryOffset(t *testing.T) {
 		}
 	}
 	total := int64(n * 10)
-	if _, err := st.AppendLog(sess, shell, make([]byte, total)); err != nil {
+	if _, err := st.AppendLog(sess, shell, make([]byte, total), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 
@@ -603,7 +603,7 @@ func TestAppendLog_ConcurrentOffsetsMatchWhereBytesLanded(t *testing.T) {
 			defer wg.Done()
 			payload := bytes.Repeat([]byte{byte('A' + w)}, chunk)
 			for i := 0; i < perWriter; i++ {
-				off, err := st.AppendLog(sess, shell, payload)
+				off, err := st.AppendLog(sess, shell, payload, StdioOut)
 				if err != nil {
 					t.Errorf("writer %d: %v", w, err)
 					return
@@ -670,7 +670,7 @@ func TestAppendLog_CloseAndDeleteRaceAppends(t *testing.T) {
 				return
 			default:
 			}
-			if _, err := st.AppendLog(sess, shell, bytes.Repeat([]byte("x"), 128)); err != nil {
+			if _, err := st.AppendLog(sess, shell, bytes.Repeat([]byte("x"), 128), StdioOut); err != nil {
 				// Close/DeleteShell concurrent with an append must not surface an
 				// error from a handle that was closed underneath it.
 				t.Errorf("append %d: %v", i, err)
@@ -685,7 +685,7 @@ func TestAppendLog_CloseAndDeleteRaceAppends(t *testing.T) {
 		}
 	}
 	// The handle cache must be rebuilt on demand, not latched shut.
-	if _, err := st.AppendLog(sess, shell, []byte("after close")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("after close"), StdioOut); err != nil {
 		t.Fatalf("append after Close: %v", err)
 	}
 
@@ -699,13 +699,13 @@ func TestAppendLog_DeleteShellThenAppendReopens(t *testing.T) {
 	st := newStore(t)
 	const sess, shell = "s1", "sh1"
 
-	if _, err := st.AppendLog(sess, shell, []byte("first")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("first"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteShell(sess, shell); err != nil {
 		t.Fatal(err)
 	}
-	off, err := st.AppendLog(sess, shell, []byte("second"))
+	off, err := st.AppendLog(sess, shell, []byte("second"), StdioOut)
 	if err != nil {
 		t.Fatalf("append after DeleteShell: %v", err)
 	}
@@ -734,7 +734,7 @@ func TestDeleteSession_LateAppendDoesNotResurrectTheDirectory(t *testing.T) {
 	if err := st.SaveSession(api.Session{ID: sess}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog(sess, shell, []byte("before")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("before"), StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteSession(sess); err != nil {
@@ -744,7 +744,7 @@ func TestDeleteSession_LateAppendDoesNotResurrectTheDirectory(t *testing.T) {
 		t.Fatalf("session dir still present after delete: %v", err)
 	}
 
-	if _, err := st.AppendLog(sess, shell, []byte("late")); err == nil {
+	if _, err := st.AppendLog(sess, shell, []byte("late"), StdioOut); err == nil {
 		t.Error("late append succeeded; expected refusal")
 	}
 	if _, err := os.Stat(st.sessionDir(sess)); err == nil {
@@ -761,7 +761,7 @@ func TestAppendLog_BeforeFirstPersistIsAllowed(t *testing.T) {
 	st := newStore(t)
 	const sess, shell = "s1", "sh1"
 
-	off, err := st.AppendLog(sess, shell, []byte("first bytes"))
+	off, err := st.AppendLog(sess, shell, []byte("first bytes"), StdioOut)
 	if err != nil {
 		t.Fatalf("first append to an unpersisted session must be accepted: %v", err)
 	}
@@ -784,14 +784,14 @@ func TestDeleteSession_ReusedIDIsWritableAgain(t *testing.T) {
 	if err := st.DeleteSession(sess); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog(sess, shell, []byte("late")); err == nil {
+	if _, err := st.AppendLog(sess, shell, []byte("late"), StdioOut); err == nil {
 		t.Error("append after delete should be refused")
 	}
 	// A new session claiming the same id.
 	if err := st.SaveSession(api.Session{ID: sess}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AppendLog(sess, shell, []byte("fresh")); err != nil {
+	if _, err := st.AppendLog(sess, shell, []byte("fresh"), StdioOut); err != nil {
 		t.Fatalf("append after re-creating the session id must be accepted: %v", err)
 	}
 }

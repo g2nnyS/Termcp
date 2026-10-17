@@ -65,19 +65,19 @@ func TestShellMarksOnRestoredSession(t *testing.T) {
 	// Two spans of bytes with a mark at each transition, and a trailing span
 	// whose mark was never appended: end is derived from the file size, so the
 	// last mark still ends at the true end of the log.
-	if _, err := store.AppendLog(sessID, shellID, []byte("OUT1")); err != nil {
+	if _, err := store.AppendLog(sessID, shellID, []byte("OUT1"), storage.StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendMark(sessID, shellID, api.LogMark{Status: api.LogOutput, Time: 1758499205123, Offset: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AppendLog(sessID, shellID, []byte("IN")); err != nil {
+	if _, err := store.AppendLog(sessID, shellID, []byte("IN"), storage.StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendMark(sessID, shellID, api.LogMark{Status: api.LogAPIInput, Time: 1758499206000, Offset: 4}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AppendLog(sessID, shellID, []byte("OUT2")); err != nil {
+	if _, err := store.AppendLog(sessID, shellID, []byte("OUT2"), storage.StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveSession(api.Session{ID: sessID, Name: "marks", Status: api.SessionExited}); err != nil {
@@ -195,7 +195,7 @@ func TestShellMarksBodyShape(t *testing.T) {
 	dir := t.TempDir()
 	store := storage.New(dir)
 	const sessID, shellID = "s-shape", "sh-shape"
-	if _, err := store.AppendLog(sessID, shellID, []byte("hi")); err != nil {
+	if _, err := store.AppendLog(sessID, shellID, []byte("hi"), storage.StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AppendMark(sessID, shellID, api.LogMark{Status: api.LogOutput, Time: 1758499205123, Offset: 0}); err != nil {
@@ -207,7 +207,7 @@ func TestShellMarksBodyShape(t *testing.T) {
 	// A second shell with bytes but no marks yet: its response must still carry an
 	// array for "marks", never null.
 	const bareShellID = "sh-bare"
-	if _, err := store.AppendLog(sessID, bareShellID, []byte("more")); err != nil {
+	if _, err := store.AppendLog(sessID, bareShellID, []byte("more"), storage.StdioOut); err != nil {
 		t.Fatal(err)
 	}
 	for _, sh := range []string{shellID, bareShellID} {
@@ -339,7 +339,7 @@ func marksFixture(t *testing.T) (*http.ServeMux, string, string) {
 	const sessID, shellID = "s-window", "sh-window"
 	statuses := []api.LogStatus{api.LogOutput, api.LogAPIInput, api.LogOutput, api.LogAIInput}
 	for i, at := range []int64{0, 4, 8, 12} {
-		if _, err := store.AppendLog(sessID, shellID, []byte("abcd")); err != nil {
+		if _, err := store.AppendLog(sessID, shellID, []byte("abcd"), storage.StdioOut); err != nil {
 			t.Fatal(err)
 		}
 		if err := store.AppendMark(sessID, shellID, api.LogMark{

@@ -167,6 +167,13 @@ func (c *uiWS) enqueueSessions() {
 			payload["connections"] = conns
 		}
 	}
+	if c.h.Extensions != nil {
+		// The right panel renders from the same frame, so a status transition is
+		// one round trip: the signal arrives, the tab re-reads this payload.
+		if rows := summarizeExtensions(c.h.Extensions); rows != nil {
+			payload["extensions"] = rows
+		}
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return
@@ -246,19 +253,24 @@ func (c *uiWS) handleWSInput(msg *wsClientMsg) {
 	if shell.Info().Status != api.SessionRunning {
 		return
 	}
-	// Review mode does NOT gate this path: this is the human's keyboard.
+	// The capability whitelist gates this path; review mode does not.
 	//
-	// The gate exists to review what the AI sends, and the AI's surface is MCP —
-	// the same distinction the InputSource constants already draw (InputFromAPI is
-	// "a human typing through the HTTP/WebSocket API", InputFromAI is "an AI agent
-	// driving the shell through MCP"). Dropping the stream here locked the operator
-	// out of their own terminal the moment they turned review on, which is not
-	// what "review the AI" means: a person watching a command run must still be
-	// able to interrupt it.
+	// Review mode is about reviewing what the AI sends, and the AI's surface is
+	// MCP — dropping the stream here locked the operator out of their own terminal
+	// the moment they turned review on. A template's whitelist is a different
+	// statement: "this session has no terminal", said by whoever pinned it. That
+	// one a token holder cannot approve their way past, so the human's own
+	// keyboard is no exception to it — and this socket is reachable by any client
+	// holding the token, not only by the browser. The REST mirror of this call
+	// (/api/shells/{id}/input) gates the same way; leaving one open would make the
+	// whitelist a matter of which transport you picked.
 	//
-	// A token holder can still bypass the gate by writing to the API directly,
-	// but they can approve their own request just as directly, so gating this path
-	// would cost the operator real usability and buy no security.
+	// A refusal is silent here because a stream has no response to carry an error:
+	// the frame is dropped and the reason is logged. The REST endpoint is where a
+	// caller gets told why.
+	if c.refuseWSCapability(shell, "shell_input") {
+		return
+	}
 	// msg.D is the JSON string xterm produced, not base64: the frame is standard
 	// JSON, so encoding/json already recovered the text and no decode step is
 	// needed. See the "传输编码" section of docs/design/session-storage.md.
@@ -279,7 +291,23 @@ func (c *uiWS) handleWSResize(msg *wsClientMsg) {
 	if shell.Info().Status != api.SessionRunning {
 		return
 	}
+	if c.refuseWSCapability(shell, "shell_resize") {
+		return
+	}
 	if err := shell.ResizePty(msg.Rows, msg.Cols); err != nil {
 		slog.Debug("ws resize", "err", err)
 	}
+}
+
+// refuseWSCapability reports whether the session owning shell does not carry tool
+// in its whitelist, and logs the drop. It resolves the parent the way the shell
+// itself does — a child shell's restriction is the container's — so the check
+// cannot disagree with what the REST and MCP surfaces answer at the same moment.
+func (c *uiWS) refuseWSCapability(shell *session.ChildShell, tool string) bool {
+	sess := c.h.Sessions.Get(shell.ParentSessionID())
+	if sess == nil || sess.Restriction().AllowsTool(tool) {
+		return false
+	}
+	slog.Debug("ws frame dropped by session restriction", "shell_id", shell.ID, "tool", tool)
+	return true
 }

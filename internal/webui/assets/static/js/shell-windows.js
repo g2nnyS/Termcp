@@ -24,15 +24,15 @@ function refreshSessionTabbar() {
   bar.classList.toggle('hidden', wins.length === 0 && _layoutMode !== 'tile');
   if (!bar.classList.contains('hidden')) restoreSessionTabbarPos(bar);
   var topWin = null;
-  if (_layoutMode === 'tile') {
+  if (!_winsHidden && _layoutMode === 'tile') {
     topWin = (_paneActiveWin && isTiledWin(_paneActiveWin)) ? _paneActiveWin : null;
-  } else {
+  } else if (!_winsHidden) {
     var topZ = -1;
     wins.forEach(function (w) {
       if (isTiledWin(w)) return;
       /* A minimized window keeps its inline z-index but is not on screen, so it
          must not win the "which tab is active" test. */
-      if (w.classList.contains('win-minimized')) return;
+      if (w.classList.contains('win-minimized') || w.classList.contains('win-hidden')) return;
       /* A full-screen window's z-index usually comes from bringShellWindowToFront;
          when it does not (e.g. a resize cleared it), fall back to the stylesheet's
          value. Ties are real at that point — same computed z-index — and the one
@@ -59,6 +59,16 @@ function refreshSessionTabbar() {
      settle. Guarded: this runs once at load, before ui-socket.js is evaluated. */
   if (typeof paintSessionTileWindowMarkers === 'function') paintSessionTileWindowMarkers();
   if (typeof blackwallPaint === 'function') blackwallPaint();
+  /* A full-screen window covers the header anyway; the class tells the header to
+     step out of the way entirely (base.css) instead of floating over it when one
+     of its own menus is open. A window only counts while it is actually on
+     screen — a minimised or hidden one leaves the header reachable. */
+  var fs = wins.some(function (w) {
+    return w.classList.contains('win-fullscreen') &&
+      !w.classList.contains('win-minimized') &&
+      !w.classList.contains('win-hidden');
+  });
+  document.body.classList.toggle('has-fullscreen-window', fs);
   var scroll = document.getElementById('session-tabs-scroll');
   if (!scroll) return;
   var byId = {};
@@ -82,10 +92,13 @@ function refreshSessionTabbar() {
         '<svg viewBox="0 0 12 12" width="10" height="10"><path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M2 2l8 8M10 2L2 10"/></svg></span>';
       tab.addEventListener('click', function (e) {
         if (e.target.closest('.session-tab-close')) return;
-        /* Same entry point as the session tiles and the mobile switcher: it
-           restores a minimized window and expands a collapsed one before
-           raising it. */
-        focusSessionWindow(w._connName || '', w._sid, null, null);
+        /* The tab owns its window, so no lookup is needed — which is what makes
+           this correct for both of the cases a session lookup would get wrong: a
+           connecting window has no session id yet (simultaneous dials would both
+           resolve to the first null id), and a status card carries the
+           extension's NAME in _sid, so resolving it as a session would dial a
+           terminal for it. Both are raised directly. */
+        focusShellWindow(w);
       });
       tab.addEventListener('mousedown', function (e) {
         if (e.button === 1) { // middle-click closes the window
@@ -337,12 +350,12 @@ function _fitWinSoon(win) {
   window.addEventListener('orientationchange', onViewportChange);
 })();
 
-/** Ensure the tiled overlay is visible (e.g. first window after restoring a saved tile preference). */
+/** Open the tiled overlay unless the operator has hidden all windows. */
 function openPaneWorkspace() {
   var ws = paneWorkspaceEl();
   if (!ws) return;
-  ws.classList.add('open');
-  ws.setAttribute('aria-hidden', 'false');
+  ws.classList.toggle('open', !_winsHidden);
+  ws.setAttribute('aria-hidden', _winsHidden ? 'true' : 'false');
   applyPaneGrid();
 }
 
@@ -364,7 +377,7 @@ function setLayoutMode(mode) {
     ws.classList.remove('open');
     ws.setAttribute('aria-hidden', 'true');
   }
-  refreshSessionTabbar();
+  syncShellWindowVisibility();
 }
 
 /** Auto-merge: more than AUTO_TILE_THRESHOLD floating windows tiles everything once; re-arms at/below threshold. */
@@ -396,22 +409,33 @@ var _wasMobileViewport = (function () {
   }
 })();
 
+/* Layout changes move windows between containers. Reapply the global hide
+   choice after each move: floats hide individually, panes hide with their
+   workspace and must not retain a float's display:none marker. */
+function syncShellWindowVisibility() {
+  var ws = paneWorkspaceEl();
+  var showPanes = _layoutMode === 'tile' && !_winsHidden;
+  if (ws) {
+    ws.classList.toggle('open', showPanes);
+    ws.setAttribute('aria-hidden', showPanes ? 'false' : 'true');
+  }
+  allShellWins().forEach(function (w) {
+    w.classList.toggle('win-hidden', _winsHidden && !isTiledWin(w));
+    if (!_winsHidden && !w.classList.contains('win-minimized')) _fitWinSoon(w);
+  });
+  if (showPanes) applyPaneGrid();
+  updateSessionTabbarToggle();
+  refreshSessionTabbar();
+}
+
 function hideAllWindows() {
   _winsHidden = true;
-  var ws = paneWorkspaceEl();
-  if (ws && _layoutMode === 'tile') { ws.classList.remove('open'); ws.setAttribute('aria-hidden', 'true'); }
-  allShellWins().forEach(function (w) {
-    if (!isTiledWin(w)) w.classList.add('win-hidden');
-  });
-  updateSessionTabbarToggle();
+  syncShellWindowVisibility();
 }
 
 function showAllWindows() {
   _winsHidden = false;
-  var ws = paneWorkspaceEl();
-  if (ws && _layoutMode === 'tile') { ws.classList.add('open'); ws.setAttribute('aria-hidden', 'false'); applyPaneGrid(); }
-  allShellWins().forEach(function (w) { w.classList.remove('win-hidden'); _fitWinSoon(w); });
-  updateSessionTabbarToggle();
+  syncShellWindowVisibility();
 }
 
 function toggleAllWindowsVisible() { _winsHidden ? showAllWindows() : hideAllWindows(); }
@@ -519,6 +543,17 @@ function restoreSessionTabbarPos(bar) {
     // pane is unaffected, so closed non-active panes would leave stale tabs.
     refreshSessionTabbar();
   }).observe(g, { childList: true });
+})();
+
+/* closeShellWindow is reached from a dozen paths (session tiles, the archive,
+   reconnect, the window's own buttons), so the header's has-fullscreen-window
+   flag cannot rely on each of them refreshing the tab bar. The container is the
+   one thing every removal goes through, and refreshSessionTabbar recomputes the
+   flag from the windows that remain. */
+(function () {
+  var c = shellWindowsEl();
+  if (!c || typeof MutationObserver === 'undefined') return;
+  new MutationObserver(function () { refreshSessionTabbar(); }).observe(c, { childList: true });
 })();
 
 // Restore last mode preference on load; keep the toggle button and tab bar in
@@ -646,6 +681,43 @@ function applyWindowViewportMode(win) {
      stale "maximized" flag would make the first restore jump back to 640x480. */
   win._maxSavedRect = null;
   win._maxed = false;
+}
+
+/** Keep a window on the centre lines its placement chose after its content settled
+ *  on a size of its own. Placement centres a box of the session default (640x480,
+ *  clamped to the viewport); a card that measures a fraction of that would hang
+ *  below and right of the middle, so the real box is moved back onto the same two
+ *  centre lines — clamped by the same 8px margin and the same header floor.
+ *
+ *  The shift is always measured from where placement left the window, not from where
+ *  the window is now: a card whose readout arrives late is re-centred from the same
+ *  base, and two shifts never stack. A reader's drag writes geometry of its own, so
+ *  callers stop asking once the window has been taken over.
+ *
+ *  Self-contained on purpose: the placement test runs positionShellWindowFromClick
+ *  on its own, so neither function may depend on a shared constant. */
+function recentreShellWindowForSize(win) {
+  if (!win || isMobileViewport()) return;
+  var realW = win.offsetWidth;
+  var realH = win.offsetHeight;
+  if (!realW || !realH) return;
+  var size = realW + 'x' + realH;
+  if (win._centredSize === size) return;
+  if (!win._placedAt) {
+    win._placedAt = { left: parseFloat(win.style.left), top: parseFloat(win.style.top) };
+  }
+  var base = win._placedAt;
+  if (isNaN(base.left) || isNaN(base.top)) return;
+  var MARGIN = 8;
+  var defW = Math.min(640, window.innerWidth - MARGIN * 2);
+  var defH = Math.min(480, window.innerHeight - MARGIN * 2);
+  if (realW >= defW && realH >= defH) return;
+  var floor = Math.max(MARGIN, appHeaderBottom());
+  win.style.left = Math.max(MARGIN,
+    Math.min(base.left + (defW - realW) / 2, window.innerWidth - realW - MARGIN)) + 'px';
+  win.style.top = Math.max(floor,
+    Math.min(base.top + (defH - realH) / 2, window.innerHeight - realH - MARGIN)) + 'px';
+  win._centredSize = size;
 }
 
 /** Fallback placement for a new .shell-window (caller must have incremented shellWindowCount).
@@ -995,8 +1067,16 @@ function deleteSessionById(sid, win) {
 }
 
 function getShellWindowBySid(sessionId) {
+  if (!sessionId) return null;
   var wins = allShellWins();
   for (var i = 0; i < wins.length; i++) {
+    /* An extension's status card carries its NAME in _sid so the tab bar can label
+       it, and a name is the author's to choose under the same [A-Za-z0-9_-]{1,64}
+       rule that a 12-hex session id satisfies. This lookup means "the window for
+       this SESSION", so a card (which has no session) is never its answer —
+       without this an extension named after a session id would be raised, notified
+       or fed that session's output instead of the session's own window. */
+    if (wins[i]._extName) continue;
     if (wins[i]._sid === sessionId) return wins[i];
   }
   return null;
@@ -1031,17 +1111,31 @@ function shellWindowForFrame(id) {
   return bySid;
 }
 
-/** The one entry point for "the user picked this session". Every trigger routes
- *  here: the session tiles, the mobile switcher, and the session tab bar. It
- *  normalises the three states a window can be in (minimized, collapsed, tiled)
- *  before raising it, so callers never have to know about any of them. */
+/** Session tiles and the mobile switcher resolve a session, opening its window
+ *  if needed. The tab bar already owns its window, including pending dials.
+ *
+ *  opts.shell names a channel to land on, for a caller that asked for one
+ *  extension's terminal rather than for the session — several extensions can be
+ *  served by one connection, so the session alone does not say which one. */
 function focusSessionWindow(connLabel, sessionId, pos, opts) {
-  opts = opts || {};
   var ex = getShellWindowBySid(sessionId);
   if (!ex) {
     openShellWindow(connLabel, sessionId, pos, opts);
     return;
   }
+  focusShellWindow(ex, opts);
+}
+
+/** Shared focus behavior for session lookup and window-owned tab clicks:
+ *  normalise the window's three states (minimized, collapsed, hidden behind the
+ *  tab bar's global "hide all") and raise it. Callers that own the window call
+ *  this directly — which is what makes the tab bar correct for a pending dial
+ *  (no session id yet) and for a status card (whose _sid is the extension's
+ *  NAME, so resolving it as a session would dial a terminal for it) without a
+ *  lookup at all. */
+function focusShellWindow(ex, opts) {
+  if (!ex || !ex.parentNode) return;
+  opts = opts || {};
   /* Minimized: bring it back before anything else looks at its geometry. */
   restoreShellWindow(ex);
   /* Collapsed to its header: a collapsed window cannot show the terminal the
@@ -1052,6 +1146,12 @@ function focusSessionWindow(connLabel, sessionId, pos, opts) {
     try { ex.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {}
   }
   bringShellWindowToFront(ex);
+  /* A window that is already up switches to the requested channel directly; a
+     freshly opened one does it once its tabs have been restored (openShellWindow
+     reads the same option). */
+  if (opts.shell && ex._channels && ex._channels[opts.shell] && typeof switchChannelTab === 'function') {
+    switchChannelTab(ex, opts.shell);
+  }
   if (opts.readOnly) lockWindowReadonly(ex);
   /* The tab bar's own "hide all" is a global state; showing one window has to
      clear it or the window we just raised stays invisible. */
