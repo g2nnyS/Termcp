@@ -69,6 +69,8 @@
 
 ### 新增
 
+- **人面与 MCP 面 token 分离（#105 第二步）**。新增 `--mcp-auth-token` / `--mcp-auth-hash`（env `TERMCP_MCP_AUTH_TOKEN` / `TERMCP_MCP_AUTH_HASH`）：这把 token 只在 `/sse`、`/message`、`/stream` 三个 MCP 传输上有效；拿它调 REST 管理面、Web UI 或 WebSocket 一律 `403`（随机串仍是 `401`，403 不构成 oracle）。给 Agent 发 MCP token 而不发人面 token，它就够不到配置导出、sidecar 注入和实例管理。只配 `--auth-token` 时行为与之前完全一致；认证通过的请求在 context 里携带 `human|agent` 类别，为 scoped token 铺路。
+
 - **连接凭据加密 Vault（#105 第一阶段）**。`termcp vault init` 在数据目录建一个 age（X25519 recipients）加密的凭据库：此后主机配置的写入一律密文落盘（`vault/ssh_configs/<name>.age`），存量明文 profile 由 `termcp vault migrate` 收编（密封后逐条解密比对再擦除明文）。设备私钥优先存 OS 凭据存储（macOS Keychain / Linux Secret Service / Windows DPAPI），daemon 启动时免密自动解锁；不可用时回退到 scrypt 密码加密的 `identity.age`，用 `termcp vault unlock` 或 `POST /api/vault/unlock` 解锁。锁定期间消耗凭据的操作（建会话、编辑、密封导出）一律 `409` 并给出解锁指引，profile 列表永远可读。多端同步的 recipients 表（`termcp vault recipients add/remove`）已就位：每条密文封送给全部设备公钥，新设备加入 = 既有设备加一行 recipients。无 vault 的部署行为完全不变。
 
   **导出收紧**：vault 化 profile 不再出现在明文导出里（响应头 `X-Termcp-Skipped-Vaulted` 点名被跳过的项）；带 `X-Termcp-Password` 的密封导出在解锁时把它们解密进信封。

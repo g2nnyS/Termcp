@@ -100,6 +100,15 @@ the WebSocket. One shared `internal/auth` middleware guards the whole mux. Missi
 wrong credentials return `401 Unauthorized` with `WWW-Authenticate: Basic` (browsers
 show their native login prompt).
 
+**Operator vs MCP token.** `--mcp-auth-token` / `--mcp-auth-hash` (or
+`TERMCP_MCP_AUTH_TOKEN` / `TERMCP_MCP_AUTH_HASH`) add a second credential that
+opens **only** the MCP transports (`/sse`, `/message`, `/stream`). Presented
+anywhere else — REST, Web UI, WebSocket — a valid MCP token is answered `403`
+(the credential is good, the door is wrong; random strings still get `401`).
+The operator token keeps opening everything. Hand agents the MCP token and they
+cannot reach profile export/injection or instance management. With only the
+operator token configured, behavior is exactly the legacy single-token one.
+
 A valid token is not the only gate. A session created by an **extension** carries a
 capability whitelist (`allow` / `paths`), and it is enforced on this surface too — a
 call outside it answers `403` with `{"error_code":"forbidden", ...}` instead of

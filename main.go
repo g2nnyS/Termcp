@@ -103,6 +103,8 @@ func main() {
 	flag.BoolVar(&cfg.MCPManageSSHConfigs, "mcp-manage-ssh-configs", cfg.MCPManageSSHConfigs, "Enable the profile write actions of the `profile` directive (create/edit/copy/delete) over MCP (off by default; passwords/keys are never exposed)")
 	flag.StringVar(&cfg.AuthToken, "auth-token", cfg.AuthToken, "HTTP authentication token (or $TERMCP_AUTH_TOKEN)")
 	flag.StringVar(&cfg.AuthHash, "auth-hash", cfg.AuthHash, "Salted SHA-256 HTTP token hash (or $TERMCP_AUTH_HASH; generate with 'termcp --gen-auth-hash')")
+	flag.StringVar(&cfg.MCPAuthToken, "mcp-auth-token", cfg.MCPAuthToken, "MCP-only authentication token (or $TERMCP_MCP_AUTH_TOKEN): valid on /sse, /message, /stream; refused (403) on the management surface")
+	flag.StringVar(&cfg.MCPAuthHash, "mcp-auth-hash", cfg.MCPAuthHash, "Salted SHA-256 MCP token hash (or $TERMCP_MCP_AUTH_HASH)")
 	flag.BoolVar(&cfg.DisableAuth, "disable-auth", cfg.DisableAuth, "Disable HTTP authentication entirely, even on non-loopback binds (or TERMCP_DISABLE_AUTH_TOKEN=1). Errors out if a token or hash is also configured.")
 	var genAuthHash bool
 	flag.BoolVar(&genAuthHash, "gen-auth-hash", false, "Generate the salted SHA-256 hash of a token for --auth-hash / $TERMCP_AUTH_HASH, then exit (token from an argument, or from stdin without echo on a terminal)")
@@ -314,6 +316,18 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 		}
 		verifier = v
 	}
+	// The MCP verifier splits the MCP transports onto their own credential
+	// (scoped-tokens.md PR 0): an agent holding it cannot drive the management
+	// surface. Absent, everything runs on the operator token as before.
+	var mcpVerifier *auth.Verifier
+	if cfg.MCPAuthToken != "" || cfg.MCPAuthHash != "" {
+		v, err := auth.NewVerifier(cfg.MCPAuthToken, cfg.MCPAuthHash)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid MCP auth config: %v\n", err)
+			os.Exit(2)
+		}
+		mcpVerifier = v
+	}
 
 	slog.SetDefault(slog.New(buildLogHandler(cfg)))
 	slog.Info("termcp server started", "version", versionString())
@@ -446,8 +460,8 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 			mcpSrv.NotifyManager().OnApprovalChange(req.ShellID, "approval "+string(req.State))
 		}
 	})
-	if verifier != nil {
-		mainSrv.Handler = auth.Middleware(verifier, mux)
+	if verifier != nil || mcpVerifier != nil {
+		mainSrv.Handler = auth.MiddlewarePair(verifier, mcpVerifier, mux)
 	}
 
 	host := strings.TrimSpace(cfg.Host)

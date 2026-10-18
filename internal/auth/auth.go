@@ -27,6 +27,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -196,35 +197,114 @@ func isPublicDoc(r *http.Request) bool {
 	return ok
 }
 
+// Kind names the trust domain a verified credential belongs to. It rides the
+// request context so downstream (logging, scope checks, the approval policy)
+// can tell the operator from an agent without knowing token shapes.
+type Kind string
+
+const (
+	// KindOperator is the deployment token: every surface, including the
+	// management REST API, the Web UI and the WebSocket.
+	KindOperator Kind = "human"
+	// KindAgent is the MCP token: the MCP transports only. A valid MCP token
+	// presented anywhere else is answered 403 — the credential is good and the
+	// door is wrong, and saying so is not an oracle (a random string still
+	// gets 401).
+	KindAgent Kind = "agent"
+)
+
+type kindContextKey struct{}
+
+// KindFromContext returns the trust domain the middleware verified for this
+// request. The second result is false when no credential was involved (public
+// documentation paths, or an unauthenticated server).
+func KindFromContext(ctx context.Context) (Kind, bool) {
+	k, ok := ctx.Value(kindContextKey{}).(Kind)
+	return k, ok
+}
+
+// mcpPaths are the MCP transports: the only doors an agent-kind token may
+// open. Everything else — management REST, Web UI, WebSocket — is the
+// operator surface.
+var mcpPaths = map[string]struct{}{
+	"/sse":     {},
+	"/message": {},
+	"/stream":  {},
+}
+
+func isMCPPath(path string) bool {
+	_, ok := mcpPaths[path]
+	return ok
+}
+
+// MiddlewarePair splits authentication into two trust domains (design doc
+// scoped-tokens.md PR 0): the operator verifier opens every surface, the mcp
+// verifier opens only the MCP transports. A request authenticated by the mcp
+// token against any other path is answered 403 — the token is valid and the
+// surface is wrong. A nil mcp verifier collapses the split: behavior is
+// byte-for-byte the legacy single-token Middleware. A nil operator verifier
+// leaves only the MCP transports reachable.
+//
+// The matched kind is stored on the request context (KindFromContext).
+func MiddlewarePair(operator, mcp *Verifier, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isPublicDoc(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		mcpOK := isMCPPath(r.URL.Path)
+		for _, c := range credentials(r) {
+			if operator != nil && operator.Verify(c.token) {
+				serveWithKind(w, r, next, c, KindOperator)
+				return
+			}
+			if mcpOK && mcp != nil && mcp.Verify(c.token) {
+				// The MCP token never earns the browser cookie: the cookie
+				// exists for the Web UI and WebSocket, both operator surface.
+				serveWithKind(w, r, next, candidate{token: c.token}, KindAgent)
+				return
+			}
+		}
+		// A valid MCP token aimed at the operator surface gets 403: distinct
+		// from 401 so the caller learns the door, not just the failure.
+		if mcp != nil && !mcpOK {
+			for _, c := range credentials(r) {
+				if mcp.Verify(c.token) {
+					http.Error(w, "forbidden: the MCP token reaches /sse, /message and /stream only", http.StatusForbidden)
+					return
+				}
+			}
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="termcp", charset="UTF-8"`)
+		http.Error(w, "unauthorized: send Authorization: Bearer <token>, Basic with the token as password, or the termcp_token cookie", http.StatusUnauthorized)
+	})
+}
+
+// serveWithKind runs next with the kind on the context, plus the legacy
+// Basic→cookie handoff for operator credentials.
+func serveWithKind(w http.ResponseWriter, r *http.Request, next http.Handler, c candidate, kind Kind) {
+	if c.viaBasic {
+		http.SetCookie(w, &http.Cookie{
+			Name:     CookieName,
+			Value:    c.token,
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			Secure:   r.TLS != nil,
+		})
+	}
+	next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), kindContextKey{}, kind)))
+}
+
 // Middleware wraps next so every request must carry a valid token. The static
 // documentation endpoints (publicPaths) bypass the check. For any other path,
 // a missing or invalid credential is answered with 401 plus a Basic challenge,
 // which makes browsers show their native username/password dialog (username is
 // ignored, password is the token). A nil or unconfigured verifier denies
 // everything except the public documentation (fail closed).
+//
+// Middleware is the single-verifier legacy shape; MiddlewarePair adds the
+// operator/agent split.
 func Middleware(v *Verifier, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isPublicDoc(r) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		for _, c := range credentials(r) {
-			if v.Verify(c.token) {
-				if c.viaBasic {
-					http.SetCookie(w, &http.Cookie{
-						Name:     CookieName,
-						Value:    c.token,
-						Path:     "/",
-						HttpOnly: true,
-						SameSite: http.SameSiteStrictMode,
-						Secure:   r.TLS != nil,
-					})
-				}
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-		w.Header().Set("WWW-Authenticate", `Basic realm="termcp", charset="UTF-8"`)
-		http.Error(w, "unauthorized: send Authorization: Bearer <token>, Basic with the token as password, or the termcp_token cookie", http.StatusUnauthorized)
-	})
+	return MiddlewarePair(v, nil, next)
 }
