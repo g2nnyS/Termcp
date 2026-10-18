@@ -214,6 +214,7 @@ const (
 )
 
 type kindContextKey struct{}
+type principalContextKey struct{}
 
 // KindFromContext returns the trust domain the middleware verified for this
 // request. The second result is false when no credential was involved (public
@@ -221,6 +222,14 @@ type kindContextKey struct{}
 func KindFromContext(ctx context.Context) (Kind, bool) {
 	k, ok := ctx.Value(kindContextKey{}).(Kind)
 	return k, ok
+}
+
+// PrincipalFromContext returns the full principal the middleware verified:
+// kind plus any scopes (scoped tokens) or the unrestricted static-credential
+// principal.
+func PrincipalFromContext(ctx context.Context) (*Principal, bool) {
+	p, ok := ctx.Value(principalContextKey{}).(*Principal)
+	return p, ok
 }
 
 // mcpPaths are the MCP transports: the only doors an agent-kind token may
@@ -237,16 +246,13 @@ func isMCPPath(path string) bool {
 	return ok
 }
 
-// MiddlewarePair splits authentication into two trust domains (design doc
-// scoped-tokens.md PR 0): the operator verifier opens every surface, the mcp
-// verifier opens only the MCP transports. A request authenticated by the mcp
-// token against any other path is answered 403 — the token is valid and the
-// surface is wrong. A nil mcp verifier collapses the split: behavior is
-// byte-for-byte the legacy single-token Middleware. A nil operator verifier
-// leaves only the MCP transports reachable.
-//
-// The matched kind is stored on the request context (KindFromContext).
-func MiddlewarePair(operator, mcp *Verifier, next http.Handler) http.Handler {
+// MiddlewareFull is MiddlewarePair plus the scoped-token table: a presented
+// tcptok_… credential resolves against the store into a scoped Principal.
+// Scoped tokens authenticate on every surface — what they may DO there is the
+// admission layer's question (their Tools/Sessions whitelists), not the
+// middleware's. Resolution failures (unknown, expired, revoked) are plain
+// invalid credentials: 401, indistinguishable from a random string.
+func MiddlewareFull(operator, mcp *Verifier, tokens *TokenStore, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isPublicDoc(r) {
 			next.ServeHTTP(w, r)
@@ -255,14 +261,20 @@ func MiddlewarePair(operator, mcp *Verifier, next http.Handler) http.Handler {
 		mcpOK := isMCPPath(r.URL.Path)
 		for _, c := range credentials(r) {
 			if operator != nil && operator.Verify(c.token) {
-				serveWithKind(w, r, next, c, KindOperator)
+				serveWithPrincipal(w, r, next, c, &Principal{ID: "operator", Kind: KindOperator})
 				return
 			}
 			if mcpOK && mcp != nil && mcp.Verify(c.token) {
 				// The MCP token never earns the browser cookie: the cookie
 				// exists for the Web UI and WebSocket, both operator surface.
-				serveWithKind(w, r, next, candidate{token: c.token}, KindAgent)
+				serveWithPrincipal(w, r, next, candidate{token: c.token}, &Principal{ID: "mcp", Kind: KindAgent})
 				return
+			}
+			if tokens != nil && strings.HasPrefix(c.token, tokenPrefix) {
+				if p, err := tokens.Resolve(c.token); err == nil {
+					serveWithPrincipal(w, r, next, c, p)
+					return
+				}
 			}
 		}
 		// A valid MCP token aimed at the operator surface gets 403: distinct
@@ -280,9 +292,23 @@ func MiddlewarePair(operator, mcp *Verifier, next http.Handler) http.Handler {
 	})
 }
 
-// serveWithKind runs next with the kind on the context, plus the legacy
-// Basic→cookie handoff for operator credentials.
-func serveWithKind(w http.ResponseWriter, r *http.Request, next http.Handler, c candidate, kind Kind) {
+// MiddlewarePair splits authentication into two trust domains (design doc
+// scoped-tokens.md PR 0): the operator verifier opens every surface, the mcp
+// verifier opens only the MCP transports. A request authenticated by the mcp
+// token against any other path is answered 403 — the token is valid and the
+// surface is wrong. A nil mcp verifier collapses the split: behavior is
+// byte-for-byte the legacy single-token Middleware. A nil operator verifier
+// leaves only the MCP transports reachable.
+//
+// The matched kind is stored on the request context (KindFromContext).
+func MiddlewarePair(operator, mcp *Verifier, next http.Handler) http.Handler {
+	return MiddlewareFull(operator, mcp, nil, next)
+}
+
+// serveWithPrincipal runs next with the principal (and its kind, for the
+// legacy reader) on the context, plus the Basic→cookie handoff for
+// operator-shaped credentials.
+func serveWithPrincipal(w http.ResponseWriter, r *http.Request, next http.Handler, c candidate, p *Principal) {
 	if c.viaBasic {
 		http.SetCookie(w, &http.Cookie{
 			Name:     CookieName,
@@ -293,7 +319,9 @@ func serveWithKind(w http.ResponseWriter, r *http.Request, next http.Handler, c 
 			Secure:   r.TLS != nil,
 		})
 	}
-	next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), kindContextKey{}, kind)))
+	ctx := context.WithValue(r.Context(), kindContextKey{}, p.Kind)
+	ctx = context.WithValue(ctx, principalContextKey{}, p)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }
 
 // Middleware wraps next so every request must carry a valid token. The static
@@ -307,4 +335,12 @@ func serveWithKind(w http.ResponseWriter, r *http.Request, next http.Handler, c 
 // operator/agent split.
 func Middleware(v *Verifier, next http.Handler) http.Handler {
 	return MiddlewarePair(v, nil, next)
+}
+
+// WithPrincipal attaches a principal to a context. It exists for tests and
+// for transports that authenticate outside the HTTP middleware (the stdio
+// bridge forwards credentials to the instance, which resolves them there).
+func WithPrincipal(ctx context.Context, p *Principal) context.Context {
+	ctx = context.WithValue(ctx, kindContextKey{}, p.Kind)
+	return context.WithValue(ctx, principalContextKey{}, p)
 }

@@ -158,3 +158,74 @@ func TestKindFromContextWithoutAuth(t *testing.T) {
 		t.Fatal("kind present on a request the middleware never saw")
 	}
 }
+
+func TestMiddlewareFull_ScopedToken(t *testing.T) {
+	operator, mcp := pairVerifiers(t)
+	tokens := OpenTokenStore(t.TempDir())
+	token, _, err := tokens.Create("agent", []string{"shell.input"}, nil, false, 0, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := MiddlewareFull(operator, mcp, tokens, kindHandler())
+
+	// A scoped token authenticates on any surface; what it may do there is
+	// the admission layer's question, not the middleware's.
+	for _, path := range []string{"/stream", "/api/connections", "/"} {
+		rec := pairRequest(t, h, path, token)
+		if rec.Code != http.StatusOK || rec.Body.String() != "agent" {
+			t.Errorf("scoped token on %s: got %d %q, want 200 agent", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Revocation takes effect on the very next request.
+	recs, _ := tokens.List()
+	if err := tokens.Revoke(recs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	rec := pairRequest(t, h, "/stream", token)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked token: got %d, want 401", rec.Code)
+	}
+}
+
+func TestMiddlewareFull_PrincipalCarriesScopes(t *testing.T) {
+	tokens := OpenTokenStore(t.TempDir())
+	token, rec, err := tokens.Create("agent", []string{"shell.input"}, []string{"sess-9"}, true, 0, "operator")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw *Principal
+	h := MiddlewareFull(nil, nil, tokens, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		saw, _ = PrincipalFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	rr := pairRequest(t, h, "/api/anything", token)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped token: got %d", rr.Code)
+	}
+	if saw == nil || saw.ID != rec.ID || saw.Kind != KindAgent {
+		t.Fatalf("principal: %+v", saw)
+	}
+	if len(saw.Tools) != 1 || saw.Tools[0] != "shell.input" || !saw.ApprovalRequired {
+		t.Fatalf("scopes lost in transit: %+v", saw)
+	}
+	if saw.Sessions[0] != "sess-9" {
+		t.Fatalf("session scope lost: %+v", saw)
+	}
+}
+
+func TestMiddlewareFull_StaticCredentialsStillWork(t *testing.T) {
+	operator, mcp := pairVerifiers(t)
+	tokens := OpenTokenStore(t.TempDir())
+	h := MiddlewareFull(operator, mcp, tokens, kindHandler())
+
+	if rec := pairRequest(t, h, "/api/connections", "operator-token"); rec.Body.String() != "human" {
+		t.Errorf("operator: %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := pairRequest(t, h, "/stream", "mcp-token"); rec.Body.String() != "agent" {
+		t.Errorf("mcp: %d %q", rec.Code, rec.Body.String())
+	}
+	if rec := pairRequest(t, h, "/api/connections", "mcp-token"); rec.Code != http.StatusForbidden {
+		t.Errorf("mcp on REST: %d, want 403", rec.Code)
+	}
+}
