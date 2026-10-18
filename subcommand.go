@@ -41,6 +41,7 @@ var subcommands = []subcommand{
 	{name: "daemon", summary: "manage the background instance", argHint: "<action>", actions: []string{actionStart, actionStop, actionStatus, actionStdio}},
 	{name: "stdio", summary: "bridge stdin/stdout MCP to an instance already answering", argHint: "[endpoint]"},
 	{name: "vault", summary: "manage the encrypted credential vault", argHint: "<action>", actions: []string{actionInit, actionUnlock, actionLock, actionStatus, actionMigrate, actionRecipients}},
+	{name: "token", summary: "mint and revoke scoped tokens for agents", argHint: "<action>", actions: []string{"create", "list", "revoke"}},
 }
 
 // findSubcommand looks a namespace up by its leading word.

@@ -109,6 +109,27 @@ The operator token keeps opening everything. Hand agents the MCP token and they
 cannot reach profile export/injection or instance management. With only the
 operator token configured, behavior is exactly the legacy single-token one.
 
+**Scoped tokens.** For per-harness grants there is a token table with real
+scopes — mint with `termcp token create` or `POST /api/tokens`:
+
+```
+POST /api/tokens            {"kind":"agent","tools":["shell.output"],"sessions":["sess-id"],
+                             "approval_required":true,"ttl_seconds":3600}
+                  → 201 {"token":"tcptok_<id>.<secret>","record":{...}}   (the plaintext is in THIS response only)
+GET  /api/tokens            → 200 {"tokens":[{id,kind,tools,sessions,expires_at,revoked_at,...}]}  (never verifiers)
+DELETE /api/tokens/{id}     → 204  (revocation is effective on the very next request)
+```
+
+- `tools` whitelist **capability ids** (`shell.input`, `file.write`, …), enforced
+  identically on MCP and REST — a call outside it answers `403`.
+- `sessions` whitelist matches the session id or the profile name that created it.
+- `approval_required: true` forces the session into review mode on first use:
+  every write then waits for a human decision.
+- Expired/revoked/unknown tokens are plain `401`, indistinguishable from garbage.
+- Token management itself is operator-only: a scoped agent token gets `403`.
+- The middleware stores the verified principal on the request context; MCP call
+  logs carry `principal_id` + `principal_kind` for audit.
+
 A valid token is not the only gate. A session created by an **extension** carries a
 capability whitelist (`allow` / `paths`), and it is enforced on this surface too — a
 call outside it answers `403` with `{"error_code":"forbidden", ...}` instead of

@@ -143,7 +143,12 @@ func main() {
 	if bridging {
 		endpoint, rest = splitStdioEndpoint(rest)
 	}
-	_ = flag.CommandLine.Parse(rest)
+	// The token namespace parses its own flags: its create action carries
+	// options the global set does not know. The raw args survive in rawRest.
+	rawRest := rest
+	if subName != "token" {
+		_ = flag.CommandLine.Parse(rest)
+	}
 
 	if showVersion {
 		printVersion(os.Stdout)
@@ -159,7 +164,7 @@ func main() {
 	}
 	cfg.ApplyEnv()
 
-	if args := flag.Args(); len(args) > 0 {
+	if args := flag.Args(); len(args) > 0 && subName != "token" {
 		if sub, ok := findSubcommand(args[0]); ok {
 			// A word that is both a subcommand and an action of the namespace
 			// already in play (`termcp daemon start stdio`) is a misplaced
@@ -250,6 +255,10 @@ func main() {
 		runVaultCLI(cfg, action, flag.Args())
 		return
 	}
+	if subName == "token" {
+		runTokenCLI(cfg, action, rawRest)
+		return
+	}
 
 	// Fail fast when the data directory cannot be created or written.
 	if err := ensureWritableDir(cfg.DataDir); err != nil {
@@ -316,6 +325,10 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 		}
 		verifier = v
 	}
+	// The scoped-token table lives next to the rest of the data dir; the
+	// middleware consults it for tcptok_… credentials (scoped-tokens.md PR 4).
+	tokenStore := auth.OpenTokenStore(cfg.DataDir)
+
 	// The MCP verifier splits the MCP transports onto their own credential
 	// (scoped-tokens.md PR 0): an agent holding it cannot drive the management
 	// surface. Absent, everything runs on the operator token as before.
@@ -419,7 +432,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	mux.Handle("GET /sse", mcpSrv.SSEHandler())
 	mux.Handle("POST /message", mcpSrv.MessageHandler())
 	mux.Handle("/stream", mcpSrv.StreamableHTTPHandler())
-	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339), Vault: credVault}
+	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339), Vault: credVault, Tokens: tokenStore}
 	// The effective countdown is published at GET /api/daemon so the stdio
 	// bridge can ping faster than it (see daemon.InstanceInfo.IdleTimeoutMS).
 	if isDaemonChild {
@@ -461,7 +474,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 		}
 	})
 	if verifier != nil || mcpVerifier != nil {
-		mainSrv.Handler = auth.MiddlewarePair(verifier, mcpVerifier, mux)
+		mainSrv.Handler = auth.MiddlewareFull(verifier, mcpVerifier, tokenStore, mux)
 	}
 
 	host := strings.TrimSpace(cfg.Host)
