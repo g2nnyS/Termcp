@@ -5,6 +5,9 @@
 > token 分权与审批网关见 `scoped-tokens.md`。
 > 已对齐协作者评论（windworst）：本地 ssh_configs 文件可关可加密、sidecar 走
 > 临时主机 API 注入、termcp 不做策略过滤逻辑。
+>
+> 执行顺序（2026-10 修订）：本文 PR 1–3 **先落地**；scoped-tokens.md 的
+> PR 0/4/5 后置。sidecar 注入面在 PR 0（双 token）落地前的过渡风险见 §六。
 
 ## 一、结论先行
 
@@ -61,6 +64,9 @@ data-dir/
   `private_key` / `key_passphrase` 三个字段（`internal/sshconfig/config.go`
   L26–28 的 `DialSpec`）必须且仅需进密文。初版更简单：**整个 profile TOML
   加密**，列表只显示文件名（profile 名），不引入双轨格式。
+- **范围边界**：vault 只管连接凭据。会话输出历史（`internal/storage` 的
+  逐 shell 落盘日志）仍是明文，属 #108 前两项（OS 钥匙串 / 透明加密磁盘）
+  的威胁模型，不在本文范围——不要把"加密所有落盘数据"混进本 PR。
 
 ## 四、身份私钥的存放与解锁链
 
@@ -82,8 +88,13 @@ keychain 不可用且无 passphrase 时，vault 保持锁定，仅消耗凭据�
 
 ## 五、凭据运行时注入：`CredentialProvider`
 
-`internal/sshclient/config.go` 当前从 `DialSpec` 直接读明文构造
-`ssh.Password` / `ssh.PublicKeys`。改为经接口取凭据：
+现状明文链路：`Store.Load`（`store.go`，temporary → 磁盘的解析顺序）→
+`RemoteFromEntry` / `dialSpecToRemote`（`config.go`）——**明文在这里跨进
+`session.RemoteSSH`**——→ `buildChainClient`（`session/dial.go`）→
+`sshclient.BuildClientConfig`（`internal/sshclient/config.go`），在那里构造
+`ssh.Password` / `ssh.PublicKeys`。Resolve 的注入点定在 `dialSpecToRemote`
+之前：Entry 出 vault 后秘密字段以引用形态存在，dial 前一次性解出，明文不
+出 `buildChainClient` 调用栈。凭据经接口取得：
 
 ```go
 // internal/sshconfig 或独立的 internal/vault 提供实现。
@@ -104,6 +115,10 @@ type CredentialProvider interface {
 - `ssh_config` 的 MCP/REST 读接口行为不变：只返回 profile 名与"已配置"
   标记，永不返回秘密字段——README 安全模型已对外承诺此语义，vault 化后
   只是让存储层配得上这个承诺。
+- **导出收紧**：REST 批量导出（`Store.ExportBatch`）现状经 `ReadRaw`
+  返回原文 TOML，是持 token 者的整库凭据出口（scoped-tokens.md P4）。
+  vault 化 profile 的导出只出密文，或强制 `X-Termcp-Password` 二次加密；
+  明文导出仅对未迁移的旧明文 profile 保留。
 
 ## 六、sidecar 注入流（远程零信任部署）
 
@@ -127,6 +142,7 @@ type CredentialProvider interface {
 | `ImportBatch(temporary=true)` 已是纯内存、不落盘（`batch.go`） | 无 TTL、无会话绑定，进程活着就一直在 |
 | 临时 profile 永久驻留内存 | 加 `expires_at` 与 `bound_session`：到期或会话 DEAD 即清除；清除走 session 已有的 `ResourceScope`（`internal/session/scope.go`），创建点挂载、`finalize` 级联释放 |
 | 注入通道只靠单一全局 token | 依赖 scoped-tokens 的 PR 0/4：注入用"人"面 token，Agent 的 MCP token 无权调用注入 API |
+| 本文 PR 1–3 先于 PR 0 落地 | 过渡期注入 API 仍由单一全局 token 守护：靠 temporary 不落盘 + TTL + 会话 DEAD 即清兜住 I4 的大部分；部署文档写明此过渡语义，并建议过渡期注入面只绑 loopback |
 
 **安全语义**：明文只在 TLS 通道内和远程实例内存中出现，且远程实例拿到的
 是**单个 profile 的单份凭据**、有 TTL——即使远程主机沦陷，攻击者拿不到

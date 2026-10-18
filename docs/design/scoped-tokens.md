@@ -5,6 +5,11 @@
 > 拦截点下沉且策略外置）；vault 与凭据分发见 `credential-vault.md`。
 > 已对齐协作者评论（windworst）：人 REST 与 MCP 分离 token、gate 上浮为
 > 安全网关层、termcp 不内建策略过滤逻辑。
+>
+> 执行顺序（2026-10 修订）：vault 优先——`credential-vault.md` 的
+> PR 1–3 先落地，本文 PR 0 → 4 → 5 依次跟随。本文初稿写于 #117（MCP
+> 工具面收成单 term 入口、`internal/capability` 准入表落地）之前，
+> §二、§4.1、§5.1、§七已按该现状修订。
 
 ## 一、结论先行
 
@@ -29,7 +34,8 @@
 |---|------|------|
 | P1 | 一把 `--auth-token` 覆盖所有面：Web UI、REST、MCP SSE/stream、WS | `internal/auth/auth.go`（包注释自述 "One token guards the whole HTTP surface"） |
 | P2 | 拿 token 的 Agent 与操作者能力完全相同，无法分权、吊销、限时 | 同上，无 scope 概念 |
-| P3 | approval gate 只拦 MCP 面，"A token holder can bypass this by calling the REST API directly" | `internal/mcp/approval_gate.go` L29 注释自述 |
+| P3 | token 不区分人与 agent：REST 面按 `GateOperator` 语义对持 token 者整体豁免审阅（"操作者本人的键盘不该被审"），持部署 token 的 agent 走 REST 即被视为操作者本人。"A token holder can bypass this by calling the REST API directly" 的注释仍在，但 #117 后问题已从"gate 漏了一个面"转化为"认证不产出身份"——修法是双 token 给身份（PR 0），不是给 REST 加审批 | `internal/capability/capability.go`（GateOperator）、`internal/mcp/approval_gate.go` |
+| P4 | REST 批量导出经 `ReadRaw` 返回含明文的原文 TOML：任何持 token 者可整库导出全部凭据，`X-Termcp-Password` 加密只是可选项。修复分两半：PR 0 禁 MCP token 调 REST 管理面；vault PR 关闭 vault 化 profile 的明文导出（credential-vault.md §五） | `internal/sshconfig/batch.go`（ExportBatch）、`internal/webui/handler_conn.go` |
 
 ## 三、双 token 拆分（PR 0）
 
@@ -52,7 +58,7 @@ tokens 表（data-dir 内，TOML 或 SQLite，随 storage 现有选型）：
   verifier:  sha256-<salt>-<digest> # 沿用 auth.Hash 的现有格式，明文不落盘
   kind:      human | agent
   scopes:
-    tools:    ["shell_output", "shell_input", ...]   # MCP 工具白名单
+    tools:    ["shell.input", "file.write", ...]     # capability ID 白名单（见下）
     sessions: ["termcp://#ctf-1", ...]               # 限定会话/entry 定位符
     approval_required: true                          # 写操作强制走审批
   expires_at: <timestamp>
@@ -60,12 +66,18 @@ tokens 表（data-dir 内，TOML 或 SQLite，随 storage 现有选型）：
   revoked_at: <timestamp | null>
 ```
 
+- `tools` 白名单写 capability ID 而非工具名：#117 后 MCP 工具面收成为单
+  `term` 入口，工具名不再是稳定词汇表，而 `internal/capability` 的表是
+  操作的唯一定义点（`IDForTool`/`ToolForID` 提供与工具名的双向映射，
+  `internal/session/restriction.go` 的 `Allows` 已按此双语义解析）。
+  scope 检查挂进两个现有准入点——MCP 的 `checkAdmission` 与 REST 的
+  `restRefuseTool`，它们本就查 capability 表，只需加 Principal 一个维度；
 - 签发：`termcp token create --kind agent --tools ... --ttl 1h`（CLI）+
   REST 管理面等价端点；token 明文**只在创建响应中出现一次**；
 - 吊销：删行 / 置 `revoked_at`，即时生效（每次请求查表，单实例无缓存
   一致性问题）；
-- 审计：`internal/mcp/logging.go` 的结构化日志增加 `token_id`、
-  `principal_kind` 字段；REST/WS 面补同等日志。
+- 审计：`internal/mcp/logging.go` 当前不记录任何 token 字段；为其结构化
+  日志增加 `token_id`、`principal_kind`，REST/WS 面补同等日志。
 
 ### 4.2 内部货币：`Principal`
 
@@ -96,15 +108,37 @@ type Authenticator interface {
 
 ## 五、审批网关：拦截点下沉 + 策略外置（PR 5）
 
-### 5.1 拦截点
+### 5.1 拦截点（按 #117 后的 capability 表修订）
 
-审批判定从 `internal/mcp/approval_gate.go`（MCP handler 层）下沉到操作层
-的汇聚点——`internal/session` 的写操作（SendInput / Create / Terminate）、
-`internal/sftp` 写、`internal/forward` 开闸。MCP、REST、WS 三个入口调
-的是同一批操作层方法，在那里拦就天然覆盖所有面，P3 的 REST 绕过消失。
+拦截点**不**物理下沉到 `internal/session` 的方法上，理由有二：其一，
+#117 已把"这个操作要不要审"集中到 `internal/capability` 的表，MCP 的
+`checkAdmission` 与 REST 的 `restRefuseTool` 都在查它；其二，`Staged`
+行级审批（`shell.input`/`shell.key` 以"行"为审批单位）必须留在各自的
+写路径里，物理下沉会与调用入口的拦截重复甚至打架。
 
-纳入审批的操作清单新增 `session_start`："用哪个 entry 向哪台主机发起
-新连接"本身是敏感操作（issue 原文此点保留）。
+做法是判定函数统一收进 capability 包，三入口共用：
+
+```go
+// internal/capability；MCP/REST/WS 的准入判定都过这一个函数。
+//
+// RestrictionView 是包内定义的窄接口，session.Restriction 天然满足。
+// 这里不能 import internal/session：session 已 import capability
+// （restriction.go），反向依赖会成环。
+type RestrictionView interface {
+	Allows(id string) bool
+	AllowsPath(p string) bool
+}
+
+func Admit(p *auth.Principal, capID string, rest RestrictionView) error
+```
+
+`GateOperator` 的豁免对象从"REST 这个面"改为"human Principal"：agent
+Principal 且 `ApprovalRequired == true` 时，REST 面同样强制走 Policy——
+P3 的"REST 绕过"随身份落地而消失。
+
+纳入审批的操作清单新增 `session_start`（capability 表中 `session.start`
+从 `GateDevice` 改 `GateReview`，一行加测试）："用哪个 entry 向哪台主机
+发起新连接"本身是敏感操作（issue 原文此点保留）。
 
 ### 5.2 策略接口
 
@@ -145,13 +179,17 @@ scope 表继续服务 agent token。前提只有一个：**`Principal` 抽象现
 | token 明文不落盘 | 只存 salted verifier（复用 `auth.Hash`），创建响应之外不出现 |
 | token 泄露 ≠ 凭据泄露 | scope 表与 vault 完全正交；远程主机沦陷拿不到 vault 密钥（credential-vault.md I4） |
 | 吊销即时生效 | 每请求查表，无缓存 |
-| gate 不可绕过 | 拦截点在操作层汇聚方法上，e2e 测试分别从 MCP / REST / WS 三路验证同一写操作被同一 gate 拦截 |
+| gate 不可绕过 | 三入口统一经 `capability.Admit` 判定，e2e 测试分别从 MCP / REST / WS 三路验证同一写操作被同一 gate 拦截 |
 
 测试照 AGENTS.md 与 `docs/agents/testing.md`：三 OS CI、`t.TempDir()`、
 过期/并发吊销用 poll-with-deadline 而非固定 sleep；gate 下沉涉及 session
 生命周期竞争，合入前跑 `make test-stress STRESS_PKGS=./internal/session/`。
 
 ## 八、PR 拆分（本文件范围内）
+
+执行顺序：`credential-vault.md` 的 PR 1–3（vault 核心、运行时注入、
+sidecar）先落地；本文 PR 0 → 4 → 5 依次跟随。PR 0 同时是 sidecar 注入
+面的安全前提（注入只许人面 token 调用）。
 
 - **PR 0 · 双 token**：`--mcp-auth-token`，MCP 面与 REST 管理面分离，
   兼容单 token 旧行为；
