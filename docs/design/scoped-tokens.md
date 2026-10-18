@@ -10,6 +10,10 @@
 > PR 1–3 先落地，本文 PR 0 → 4 → 5 依次跟随。本文初稿写于 #117（MCP
 > 工具面收成单 term 入口、`internal/capability` 准入表落地）之前，
 > §二、§4.1、§5.1、§七已按该现状修订。
+>
+> 实现状态（2026-10-19）：PR 0（双 token）与 PR 4（scoped token 表、
+> Principal、/api/tokens + termcp token CLI、MCP/REST 双入口 scope 生效、
+> 审计字段）已实现。PR 5 的 Policy 接口与 `session_start` 入审未做。
 
 ## 一、结论先行
 
