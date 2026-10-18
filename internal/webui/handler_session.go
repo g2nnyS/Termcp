@@ -3,6 +3,7 @@ package webui
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -111,6 +112,14 @@ func (h *Handler) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, sshclient.DescribeDialError(err), http.StatusBadRequest)
 		return
+	}
+	// Same binding as the MCP session_start path: a temporary profile injected
+	// for this job is dropped when the session's transport dies.
+	if cfgName != "" && h.SSH != nil && h.SSH.IsTemporary(cfgName) {
+		if err := h.SSH.BindTemporary(cfgName, sess.ID); err != nil {
+			slog.Warn("temporary profile binding failed; profile lives until TTL or process exit",
+				"profile", cfgName, "session_id", sess.ID, "err", err)
+		}
 	}
 	// No pid here either - see the MCP session_start handler for why (the process
 	// is remote and SSH does not report its number).

@@ -362,6 +362,10 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	// CLI / unlock endpoints; nothing here auto-unlocks.
 	credVault := vault.New(cfg.DataDir)
 	sshStore.SetVault(credVault)
+	// Sidecar-injected (temporary) profiles die with the session they were
+	// bound to: the dead hook drops them, TTL sweeping in the store covers the
+	// never-used case (see internal/sshconfig temporaryProfile).
+	sessMgr.AddOnDeadHook(func(sessionID string) { sshStore.DropBoundTemporary(sessionID) })
 	// Auto-unlock from the OS keychain when the deployment set that up; a
 	// passphrase-only vault stays locked until POST /api/vault/unlock, and a
 	// locked vault fails only credential-consuming operations.
