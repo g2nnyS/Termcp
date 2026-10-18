@@ -244,6 +244,10 @@ func main() {
 		runDaemonManagement(cfg, daemonCmd == actionStop)
 		return
 	}
+	if subName == "vault" {
+		runVaultCLI(cfg, action, flag.Args())
+		return
+	}
 
 	// Fail fast when the data directory cannot be created or written.
 	if err := ensureWritableDir(cfg.DataDir); err != nil {
@@ -356,7 +360,18 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	// profile writes into ciphertext, while reads fall back to plaintext for
 	// profiles not yet migrated. Unlock happens through the `termcp vault`
 	// CLI / unlock endpoints; nothing here auto-unlocks.
-	sshStore.SetVault(vault.New(cfg.DataDir))
+	credVault := vault.New(cfg.DataDir)
+	sshStore.SetVault(credVault)
+	// Auto-unlock from the OS keychain when the deployment set that up; a
+	// passphrase-only vault stays locked until POST /api/vault/unlock, and a
+	// locked vault fails only credential-consuming operations.
+	if credVault.Exists() {
+		if err := credVault.UnlockAuto(); err != nil {
+			slog.Info("vault present, auto-unlock unavailable; unlock with `termcp vault unlock` or POST /api/vault/unlock")
+		} else {
+			slog.Info("vault unlocked from the OS credential store")
+		}
+	}
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	mux := http.NewServeMux()
@@ -386,7 +401,7 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	mux.Handle("GET /sse", mcpSrv.SSEHandler())
 	mux.Handle("POST /message", mcpSrv.MessageHandler())
 	mux.Handle("/stream", mcpSrv.StreamableHTTPHandler())
-	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339)}
+	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339), Vault: credVault}
 	// The effective countdown is published at GET /api/daemon so the stdio
 	// bridge can ping faster than it (see daemon.InstanceInfo.IdleTimeoutMS).
 	if isDaemonChild {

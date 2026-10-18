@@ -158,6 +158,10 @@ func (h *Handler) handlePutConnection(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := h.SSH.SaveWithOptions(name, body, temporary); err != nil {
+		if errors.Is(err, vault.ErrLocked) {
+			http.Error(w, "the vault is locked: unlock it before writing a vaulted profile", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

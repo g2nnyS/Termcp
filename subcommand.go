@@ -16,6 +16,12 @@ const (
 	actionStop   = "stop"
 	actionStatus = "status"
 	actionStdio  = "stdio"
+
+	actionInit       = "init"
+	actionUnlock     = "unlock"
+	actionLock       = "lock"
+	actionMigrate    = "migrate"
+	actionRecipients = "recipients"
 )
 
 // subcommand describes one leading command-line namespace: `termcp <name>
@@ -34,6 +40,7 @@ type subcommand struct {
 var subcommands = []subcommand{
 	{name: "daemon", summary: "manage the background instance", argHint: "<action>", actions: []string{actionStart, actionStop, actionStatus, actionStdio}},
 	{name: "stdio", summary: "bridge stdin/stdout MCP to an instance already answering", argHint: "[endpoint]"},
+	{name: "vault", summary: "manage the encrypted credential vault", argHint: "<action>", actions: []string{actionInit, actionUnlock, actionLock, actionStatus, actionMigrate, actionRecipients}},
 }
 
 // findSubcommand looks a namespace up by its leading word.
