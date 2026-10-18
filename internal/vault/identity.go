@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"filippo.io/age"
@@ -72,6 +73,10 @@ func (v *Vault) Init(passphrase string) (recipient string, err error) {
 		_ = os.Remove(v.identityPath())
 		return "", err
 	}
+	// Keychain is a convenience, never a requirement: when it answers, the
+	// identity is mirrored there for passphrase-free unlocks; the scrypt file
+	// already on disk remains the portable fallback.
+	v.storeInKeychain(id.String())
 	v.setUnlocked(id)
 	return id.Recipient().String(), nil
 }
@@ -100,12 +105,22 @@ func (v *Vault) Unlock(passphrase string) error {
 	if err != nil {
 		return fmt.Errorf("unlock: read identity: %w", err)
 	}
-	id, err := age.ParseX25519Identity(string(bytes.TrimSpace(plain)))
+	id, err := parseIdentityString(string(bytes.TrimSpace(plain)))
 	if err != nil {
-		return fmt.Errorf("unlock: parse identity: %w", err)
+		return err
 	}
 	v.setUnlocked(id)
 	return nil
+}
+
+// parseIdentityString parses a stored age identity, accepting the trailing
+// newline the CLI tools and file format both tend to append.
+func parseIdentityString(s string) (*age.X25519Identity, error) {
+	id, err := age.ParseX25519Identity(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("parse identity: %w", err)
+	}
+	return id, nil
 }
 
 // storeIdentity persists id encrypted with the passphrase. The identity file
