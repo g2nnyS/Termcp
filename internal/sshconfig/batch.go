@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -98,7 +99,10 @@ func (s *Store) ExportBatch(only []string, sealed bool) (*BatchExportResult, err
 
 // ImportBatch validates the entire TOML document, then assigns unique names
 // before creating profiles. Existing profiles are never overwritten.
-func (s *Store) ImportBatch(data []byte, temporary bool) (*BatchImportResult, error) {
+//
+// With temporary=true the profiles live in process memory only; ttl>0 sweeps
+// them after that span (the sidecar injection path, design doc §六).
+func (s *Store) ImportBatch(data []byte, temporary bool, ttl time.Duration) (*BatchImportResult, error) {
 	if len(data) > maxBatchSize {
 		return nil, fmt.Errorf("import file too large (max %d bytes)", maxBatchSize)
 	}
@@ -176,10 +180,14 @@ func (s *Store) ImportBatch(data []byte, temporary bool) (*BatchImportResult, er
 	}
 	if temporary {
 		if s.temporary == nil {
-			s.temporary = make(map[string][]byte)
+			s.temporary = make(map[string]temporaryProfile)
+		}
+		var expiresAt time.Time
+		if ttl > 0 {
+			expiresAt = time.Now().Add(ttl)
 		}
 		for _, item := range items {
-			s.temporary[item.name] = append([]byte(nil), item.data...)
+			s.temporary[item.name] = temporaryProfile{data: append([]byte(nil), item.data...), expiresAt: expiresAt}
 		}
 	} else {
 		created := make([]string, 0, len(items))

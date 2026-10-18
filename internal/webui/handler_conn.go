@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/open-mcp-ai/termcp/internal/configcrypt"
 	"github.com/open-mcp-ai/termcp/internal/locator"
@@ -251,6 +252,22 @@ func (h *Handler) handleImportConnections(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	// ttl_seconds bounds how long an imported temporary profile lives in this
+	// process (the sidecar injection window); it is meaningless for a
+	// persistent import and rejected there rather than silently ignored.
+	var ttl time.Duration
+	if raw := r.URL.Query().Get("ttl_seconds"); raw != "" {
+		if !temporary {
+			http.Error(w, "ttl_seconds only applies with temporary=true", http.StatusBadRequest)
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 24*3600 {
+			http.Error(w, "ttl_seconds must be 1..86400", http.StatusBadRequest)
+			return
+		}
+		ttl = time.Duration(n) * time.Second
+	}
 	const maxUpload = 16 << 20
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxUpload+1))
 	if err != nil {
@@ -277,7 +294,7 @@ func (h *Handler) handleImportConnections(w http.ResponseWriter, r *http.Request
 		}
 		body = plain
 	}
-	result, err := h.SSH.ImportBatch(body, temporary)
+	result, err := h.SSH.ImportBatch(body, temporary, ttl)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/open-mcp-ai/termcp/internal/vault"
 )
@@ -23,6 +24,17 @@ var ErrNotFound = errors.New("not found")
 // message that Delete already carries.
 var ErrReserved = errors.New("reserved ssh config")
 
+// temporaryProfile is an in-memory-only profile (the sidecar injection
+// landing spot, design doc §六): it never touches disk, carries an optional
+// TTL, and can be bound to a session so that session's DEAD transition drops
+// it. Both bounds exist so a remote instance's plaintext window stays as
+// short as the job it was injected for.
+type temporaryProfile struct {
+	data      []byte
+	expiresAt time.Time // zero = lives until process exit
+	boundTo   string    // session id; empty = unbound
+}
+
 // Store manages dataDir/ssh_configs/<name>/config.toml for remote profiles.
 // The built-in "internal" profile is virtual: it is never written to disk.
 //
@@ -35,9 +47,9 @@ var ErrReserved = errors.New("reserved ssh config")
 type Store struct {
 	dataDir   string
 	mu        sync.Mutex
-	temporary map[string][]byte // process-local profiles; guarded by mu
-	onChange  atomic.Value      // func(), set via SetOnChange, called after Save/Delete/Rename
-	vault     *vault.Vault      // nil until SetVault
+	temporary map[string]temporaryProfile // process-local profiles; guarded by mu
+	onChange  atomic.Value                // func(), set via SetOnChange, called after Save/Delete/Rename
+	vault     *vault.Vault                // nil until SetVault
 }
 
 // SetVault attaches the credential vault rooted at the same data directory.
@@ -119,12 +131,12 @@ func (s *Store) Load(name string) (*Entry, error) {
 		return nil, err
 	}
 	s.mu.Lock()
-	data, inMemory := s.temporary[name]
-	data = append([]byte(nil), data...)
+	s.sweepExpiredLocked(time.Now())
+	tp, inMemory := s.temporary[name]
 	vt := s.vault
 	s.mu.Unlock()
 	if inMemory {
-		return ParseAndValidate(data)
+		return ParseAndValidate(tp.data)
 	}
 	if vt != nil && vt.Exists() && vt.Has(name) {
 		// A vaulted profile decrypts at load time; a locked vault fails the
@@ -136,7 +148,7 @@ func (s *Store) Load(name string) (*Entry, error) {
 		}
 		return ParseAndValidate(plain)
 	}
-	data, err = os.ReadFile(p)
+	data, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("ssh config %q %w (use data-dir/ssh_configs/%s/config.toml)", name, ErrNotFound, name)
@@ -168,12 +180,12 @@ func (s *Store) ReadRaw(name string) ([]byte, error) {
 		return nil, err
 	}
 	s.mu.Lock()
-	data, inMemory := s.temporary[name]
-	data = append([]byte(nil), data...)
+	s.sweepExpiredLocked(time.Now())
+	tp, inMemory := s.temporary[name]
 	vt := s.vault
 	s.mu.Unlock()
 	if inMemory {
-		return data, nil
+		return append([]byte(nil), tp.data...), nil
 	}
 	if vt != nil && vt.Exists() && vt.Has(name) {
 		// ReadRaw feeds the operator's own edit form, so a vaulted profile
@@ -181,7 +193,7 @@ func (s *Store) ReadRaw(name string) ([]byte, error) {
 		// operator's keyboard already has. Locked vaults answer ErrLocked.
 		return vt.Decrypt(name)
 	}
-	data, err = os.ReadFile(p)
+	data, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
 	}
@@ -197,6 +209,7 @@ func (s *Store) ReadRaw(name string) ([]byte, error) {
 // Leftover ssh_configs/internal/ directories are ignored.
 func (s *Store) List() ([]string, error) {
 	s.mu.Lock()
+	s.sweepExpiredLocked(time.Now())
 	vt := s.vault
 	entries, err := os.ReadDir(s.root())
 	if err != nil {
@@ -292,9 +305,9 @@ func (s *Store) SaveWithOptions(name string, data []byte, temporary bool) error 
 	useVault := vt != nil && vt.Exists()
 	if temporary {
 		if s.temporary == nil {
-			s.temporary = make(map[string][]byte)
+			s.temporary = make(map[string]temporaryProfile)
 		}
-		s.temporary[name] = append([]byte(nil), data...)
+		s.temporary[name] = temporaryProfile{data: append([]byte(nil), data...)}
 	}
 	s.mu.Unlock()
 
@@ -340,8 +353,80 @@ func (s *Store) SaveWithOptions(name string, data []byte, temporary bool) error 
 func (s *Store) IsTemporary(name string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sweepExpiredLocked(time.Now())
 	_, ok := s.temporary[name]
 	return ok
+}
+
+// SaveTemporary stores a remote profile in memory only, with a TTL after
+// which it is swept on the next access (0 = lives until process exit). It
+// supersedes any disk or vaulted copy of the same name.
+func (s *Store) SaveTemporary(name string, data []byte, ttl time.Duration) error {
+	if err := s.SaveWithOptions(name, data, true); err != nil {
+		return err
+	}
+	if ttl > 0 {
+		s.mu.Lock()
+		if tp, ok := s.temporary[name]; ok {
+			tp.expiresAt = time.Now().Add(ttl)
+			s.temporary[name] = tp
+		}
+		s.mu.Unlock()
+	}
+	return nil
+}
+
+// BindTemporary ties a temporary profile to a session: when that session
+// turns DEAD, DropBoundTemporary removes the profile. Binding happens at the
+// first session created from the profile — the sidecar flow injects one
+// profile per intended session, so a shared profile dying with its first
+// session is the correct failure direction (its credentials were minted for
+// that job).
+func (s *Store) BindTemporary(name, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tp, ok := s.temporary[name]
+	if !ok {
+		return fmt.Errorf("temporary profile %q: %w", name, ErrNotFound)
+	}
+	tp.boundTo = sessionID
+	s.temporary[name] = tp
+	return nil
+}
+
+// DropBoundTemporary removes every temporary profile bound to sessionID. The
+// manager's dead hook calls it; the profiles' secrets stop existing in this
+// process the moment their job's transport dies.
+func (s *Store) DropBoundTemporary(sessionID string) {
+	s.mu.Lock()
+	dropped := false
+	for name, tp := range s.temporary {
+		if tp.boundTo == sessionID {
+			delete(s.temporary, name)
+			dropped = true
+		}
+	}
+	s.mu.Unlock()
+	if dropped {
+		s.notifyChange()
+	}
+}
+
+// sweepExpiredLocked drops TTL-expired temporary profiles. Callers hold mu.
+// The sweep is lazy (on access) rather than a janitor goroutine: an expired
+// profile matters only when something reads the store, and every read sweeps
+// first — no timer to leak, no lifecycle to plumb into shutdown.
+func (s *Store) sweepExpiredLocked(now time.Time) {
+	dropped := false
+	for name, tp := range s.temporary {
+		if !tp.expiresAt.IsZero() && !now.Before(tp.expiresAt) {
+			delete(s.temporary, name)
+			dropped = true
+		}
+	}
+	if dropped {
+		defer s.notifyChange()
+	}
 }
 
 func (s *Store) checkNameCollisionLocked(name, exclude string) error {
