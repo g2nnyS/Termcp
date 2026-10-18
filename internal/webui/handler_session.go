@@ -185,7 +185,7 @@ func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	// A restriction refuses the batch wholesale when any entry is restricted, the
 	// same rule the MCP guard documents: a partial refusal would look like a
 	// partial success, and closing some of what was asked reads as done.
-	if h.restRefuseSessionIDs(w, id, capability.SessionTerminate) {
+	if h.restRefuseSessionIDs(w, r, id, capability.SessionTerminate) {
 		return
 	}
 	if strings.Contains(id, ",") {
@@ -214,7 +214,7 @@ func (h *Handler) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 // others. A single id is unchanged (204 or 404).
 func (h *Handler) handlePurgeSession(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if h.restRefuseSessionIDs(w, id, capability.SessionDelete) {
+	if h.restRefuseSessionIDs(w, r, id, capability.SessionDelete) {
 		return
 	}
 	if strings.Contains(id, ",") {
