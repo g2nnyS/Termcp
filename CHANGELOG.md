@@ -69,6 +69,12 @@
 
 ### 新增
 
+- **连接凭据加密 Vault（#105 第一阶段）**。`termcp vault init` 在数据目录建一个 age（X25519 recipients）加密的凭据库：此后主机配置的写入一律密文落盘（`vault/ssh_configs/<name>.age`），存量明文 profile 由 `termcp vault migrate` 收编（密封后逐条解密比对再擦除明文）。设备私钥优先存 OS 凭据存储（macOS Keychain / Linux Secret Service / Windows DPAPI），daemon 启动时免密自动解锁；不可用时回退到 scrypt 密码加密的 `identity.age`，用 `termcp vault unlock` 或 `POST /api/vault/unlock` 解锁。锁定期间消耗凭据的操作（建会话、编辑、密封导出）一律 `409` 并给出解锁指引，profile 列表永远可读。多端同步的 recipients 表（`termcp vault recipients add/remove`）已就位：每条密文封送给全部设备公钥，新设备加入 = 既有设备加一行 recipients。无 vault 的部署行为完全不变。
+
+  **导出收紧**：vault 化 profile 不再出现在明文导出里（响应头 `X-Termcp-Skipped-Vaulted` 点名被跳过的项）；带 `X-Termcp-Password` 的密封导出在解锁时把它们解密进信封。
+
+  **sidecar 注入**：`POST /api/connections/batch?temporary=true&ttl_seconds=N` 注入的内存临时 profile 现在带 TTL，且在首个引用它的会话 DEAD 时自动清除——远程零信任实例的明文窗口收窄到任务存活期（见 `docs/deploy.md` 零信任远程实例章节）。`internal/sshclient.DialAuth` 预留了 `Signers` 字段，为 SSH CA 短期证书的长期方向留好接缝。
+
 - **配置导出可以设密码（#108 的第三项）**。`GET /api/connections/batch` 带上 `X-Termcp-Password` 头就导出一份加密文件（`TERMCP-ENC 1` 头 + base64 的 salt ‖ nonce ‖ AES-256-GCM 密文，按 64 列折行），导入时在同一个头里给密码就能打开。密码放**头**而不是 query：URL 会进 shell history、代理日志、浏览器历史，写在里面的密码和使用它的那一个动作就把它泄了。不带这个头就是原来那份明文 TOML，旧脚本与旧导出文件不受影响。
 
   为什么值得单独一个头：明文导出里装着凭据，而它的用途就是**离开这台机器**。没有密码时那份文件里什么都读不到；密码错了是被认证拒绝（GCM 验签）而不是解出一堆乱码；文件被改过也打不开。缺密码导入给 401 并指名该用哪个头，而不是把密文丢给 TOML 解析器报一个满屏 base64 里的语法错。

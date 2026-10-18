@@ -8,6 +8,12 @@
 >
 > 执行顺序（2026-10 修订）：本文 PR 1–3 **先落地**；scoped-tokens.md 的
 > PR 0/4/5 后置。sidecar 注入面在 PR 0（双 token）落地前的过渡风险见 §六。
+>
+> 实现状态（2026-10-19）：PR 1–3 已实现——`internal/vault`（age recipients
+> + keychain 自动解锁链）、`sshconfig.Store` vault 后端（含导出收紧）、
+> `termcp vault` CLI 与 `/api/vault` 端点、临时 profile 的 TTL 与会话绑定。
+> §六 表格中"需要补的"两行的机制已落地；注入通道的人/MCP 分离仍待
+> scoped-tokens.md 的 PR 0。
 
 ## 一、结论先行
 

@@ -175,8 +175,38 @@ forgotten. Set it in the connection editor's checkbox or as
 `default_approval = true` in the profile's TOML.
 
 `temporary: true` marks a remote profile held only in process memory. It remains
-available to REST, MCP, and the Web UI until termcp exits. It is never written
-under `ssh_configs/`.
+available to REST, MCP, and the Web UI until termcp exits, its TTL lapses, or
+the session it was bound to dies — whichever comes first. It is never written
+under `ssh_configs/`. TTL and binding are the sidecar-injection contract (see
+*Credential vault* below): an injected profile's plaintext window is bounded by
+the job it was minted for.
+
+### Credential vault
+
+When the data directory holds a vault (`termcp vault init`), every write to a
+remote profile is sealed with age (X25519 recipients) under
+`vault/ssh_configs/<name>.age` and any plaintext TOML of the same profile is
+scrubbed. Profiles migrated by `termcp vault migrate` behave the same.
+Reads of profiles not yet migrated fall back to plaintext.
+
+A **locked** vault fails every credential-consuming operation with `409` and an
+unlock hint: creating a session from a vaulted profile, editing or reading one,
+and sealed exports that include one. Listing profile names always works.
+
+```
+GET  /api/vault            → 200 {"initialized":true,"unlocked":false,"can_auto_unlock":true,"profiles":["prod"]}
+POST /api/vault/unlock     body {"passphrase":"…"} → 204; 401 wrong passphrase; 404 no vault
+POST /api/vault/lock       → 204; 404 no vault
+```
+
+Unlock is per-process: the CLI verbs `termcp vault unlock|lock` drive these
+endpoints on the running instance. A daemon whose OS keychain holds the vault
+identity unlocks itself at startup and never prompts.
+
+Vaulted profiles leave the machine only sealed: a **plaintext** export skips
+them and names them in the `X-Termcp-Skipped-Vaulted` response header; an
+export sealed with `X-Termcp-Password` decrypts them into the envelope
+(locked vault → `409`).
 
 ### `GET /api/connections/{name}`
 
@@ -242,10 +272,12 @@ fallback, invisible to the user).
 
 Imports a TOML file. Send its bytes as the request body (`Content-Type:
 application/toml`). Set `temporary=true` to keep **all** imported profiles only
-in memory. The upload limit is 16 MiB. Existing names, case-insensitive
-duplicates, and the reserved `internal` name receive a unique `-2`, `-3`, …
-suffix; existing profiles are never overwritten. Invalid profiles reject the
-whole import before any profile is added.
+in memory; add `ttl_seconds=N` (1..86400) to sweep them after N seconds — a
+temporary profile is also dropped when the session created from it turns DEAD.
+`ttl_seconds` without `temporary=true` is `400`. The upload limit is 16 MiB.
+Existing names, case-insensitive duplicates, and the reserved `internal` name
+receive a unique `-2`, `-3`, … suffix; existing profiles are never overwritten.
+Invalid profiles reject the whole import before any profile is added.
 
 An **encrypted** export imports the same way, with the password in
 `X-Termcp-Password`. Missing password → `401` naming the header; wrong password

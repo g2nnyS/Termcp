@@ -92,3 +92,35 @@ docker compose up -d --build
 ```bash
 make build-api    # dist/termcp-api-<os>-<arch>
 ```
+
+## 零信任远程实例（sidecar 注入）
+
+适用场景：termcp 跑在一台**不可信**的远程主机/容器里供 Agent 调用，凭据不离开本地可信端（设计：`docs/design/credential-vault.md`）。远程实例不建 vault、不落凭据；本地 sidecar 经已认证的 REST 注入**内存临时 profile**，会话结束或 TTL 到期即自动清除。
+
+远程实例（零持久秘密）：
+
+```bash
+termcp --no-internal --host 0.0.0.0 --port 18765 --auth-token <长期随机串>
+```
+
+本地 sidecar（持 vault）：
+
+```bash
+# 1. 解锁本地 vault（keychain 用户免密）
+termcp vault unlock   # 或启动本地实例由 keychain 自动解锁
+
+# 2. 经本地实例取出目标 profile 的明文 TOML（本地 vault 解锁状态下，
+#    GET 单条配置返回解密后的原文），注入远程实例为临时 profile（TTL 10 分钟）
+#    明文只存在于 TLS 通道与远程实例内存
+curl -s 'http://127.0.0.1:18765/api/connections/prod' | \
+  curl -X POST 'https://remote:18765/api/connections/batch?temporary=true&ttl_seconds=600' \
+       -H 'Authorization: Bearer <远程 token>' --data-binary @-
+
+# 3. 引用注入的名字开会话（首个会话绑定该 profile；会话 DEAD 即清除）
+curl -X POST 'https://remote:18765/api/sessions' \
+     -H 'Authorization: Bearer <远程 token>' \
+     -H 'Content-Type: application/json' \
+     -d '{"ssh_config":"prod"}'
+```
+
+两条清除路径互为冗余：会话 DEAD（经绑定）与 TTL（经懒清扫）。注入用的明文取自本地实例的单条配置 GET——它要求本地 vault 处于解锁态，且只出现在管道里。在 token 分权（scoped token）落地前，注入端点由单一全局 token 守护，过渡期建议注入面只绑 loopback 或受信网络段。
