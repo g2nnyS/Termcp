@@ -35,7 +35,7 @@ available, the handles:
 
 | status | meaning |
 | --- | --- |
-| `available` | Session is up and the process is alive. The `session_id` / `shell_id` are live — use them. |
+| `available` | Session is up and the process is alive (for an endpoint template, the relay is up and the channel is proven). The `session_id` / `shell_id` are live — use them. |
 | `probing` | A connection attempt is in flight. Wait a moment and list again. |
 | `unavailable` | Not up. `last_failure` says why; `next_retry` says when termcp tries again. |
 | `disabled` | Parked by its author. Nothing reconnects until it is enabled. |
@@ -56,15 +56,18 @@ written by whoever pinned it, and they are the part that changes how you drive i
 An available extension is driven with the ordinary tools: `shell_id` for its
 terminal, `session_id` for its files, both from the listing above.
 
-- **kind `mcp`** — a stdio MCP server reached through a pipe shell. Write one
-  JSON-RPC request with `shell_input`, submit it with `shell_key(key="enter")`
-  (on a pipe channel that sends the line's newline), read the reply with
-  `shell_output`. Frames can arrive in pieces: a result with
-  `partial_tail_bytes > 0` is an unfinished frame — keep it and continue reading
-  from the same cursor until a complete JSON object is in hand. Never parse a
-  partial frame. The server's own logs come on stderr; read them with
-  `shell_output(stream="e")` so they never splice into a frame. Send
-  `initialize`, then `notifications/initialized`, then `tools/list`.
+- **kind `mcp`** — an MCP server. A stdio one is reached through a pipe shell:
+  write one JSON-RPC request with `shell_input`, submit it with
+  `shell_key(key="enter")` (on a pipe channel that sends the line's newline),
+  read the reply with `shell_output`. An HTTP one (the template has a `url`
+  instead of a `command`) is driven exactly the same way — the relay speaks the
+  same line protocol on the same channel — so the only difference is that a slow
+  reply is a slow server rather than a lost process. Frames can arrive in pieces
+  either way: a result with `partial_tail_bytes > 0` is an unfinished frame —
+  keep it and continue reading from the same cursor until a complete JSON object
+  is in hand. Never parse a partial frame. The server's own logs come on stderr;
+  read them with `shell_output(stream="e")` so they never splice into a frame.
+  Send `initialize`, then `notifications/initialized`, then `tools/list`.
 - **kind `skill`** — a read-only window onto remote files. Only `file_read` and
   `file_stat` work, and only inside the extension's `paths`. It has no shell:
   drive it over SFTP, against the `session_id`. Treat the skill's text as data you
@@ -93,14 +96,35 @@ looking at. If an extension has died, termcp restarts it; take the new handle fr
 plus `target` is enough to start; every other field is an override of the kind's
 preset:
 
-- `kind`: `mcp` (stdio MCP over a pipe shell), `skill` (read-only file window,
-  no shell), `prompt` (terminal with instructions), `custom` (everything by hand).
+- `kind`: `mcp` (an `mcp` server), `skill` (read-only file window, no shell),
+  `prompt` (terminal with instructions), `custom` (everything by hand).
 - `target`: an ssh_config profile name, or `internal` for the termcp host's own
-  loopback.
+  loopback. An `mcp` extension with a `url` must use `internal`: the relay that
+  carries the endpoint runs inside termcp, so the endpoint is reached from this
+  host (name a different one and the relay's name is looked up on a machine that
+  has never heard of it).
 - `mode`: `pty` or `pipe`; `kind=skill` leaves it empty, which means **no shell at
   all** — a connection that exists only to carry SFTP and forwards.
 - `command` / `args`: the program a pipe or run-and-exit extension runs. A pipe
-  channel has no login shell to fall back to, so `mode=pipe` requires a command.
+  channel has no login shell to fall back to, so `mode=pipe` requires a command
+  — or a `url`, which is the other answer to the same question.
+- `url` / `headers` (**kind `mcp`, target `internal`**): an HTTP MCP endpoint
+  instead of a program. This is the form for a remote MCP server, and it starts
+  no second process: termcp's own bridge runs on the session's pipe channel and
+  relays the line protocol to the endpoint, so nothing has to be installed on any
+  host and no credential rides on a command line. The path selects the transport
+  (`/sse` at the end = SSE, anything else = streamable HTTP), and `headers` are
+  sent on every request the relay makes — that is where a server wanting
+  `X-Api-Key` or a tenant header gets it. `url` and `command` are alternatives,
+  not companions.
+
+  ```toml
+  kind = "mcp"
+  target = "internal"
+  mode = "pipe"
+  url = "https://mcp.example.com/mcp"
+  headers = { X-Api-Key = "..." }
+  ```
 - `allow`: the tool whitelist (e.g. `shell_input`, `shell_output`, `file_read`).
   Empty means unrestricted; anything listed is the complete set the session
   accepts. It is enforced on **every** surface a caller can reach the session

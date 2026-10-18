@@ -67,7 +67,7 @@
 
     <div class="card">
       <h3>Authentication</h3>
-      <p class="muted" style="margin-top:0">When termcp starts with <code class="inline">--auth-token</code> / <code class="inline">--auth-hash</code> (or the matching environment variable), the same token protects Web UI, REST, MCP, and WebSocket. (Only the read-only documentation endpoints <code class="inline">/api.md</code> and <code class="inline">/skills.md</code> stay open without credentials so agents and scripts can fetch them before configuring a token.)</p>
+      <p class="muted" style="margin-top:0">When termcp starts with <code class="inline">--auth-token</code> / <code class="inline">--auth-hash</code> (or the matching environment variable), the same token protects Web UI, REST, MCP, and WebSocket. (Only the read-only documentation endpoints <code class="inline">/api.md</code> and <code class="inline">/SKILL.md</code> stay open without credentials so agents and scripts can fetch them before configuring a token.)</p>
       <table>
         <thead><tr><th>Client</th><th>How to authenticate</th></tr></thead>
         <tbody>
@@ -86,7 +86,7 @@
       <div class="ep">
         <code id="url-skill"></code>
         <button type="button" class="copy-btn" data-copy="url-skill">Copy</button>
-        <a class="copy-btn" href="/skills.md" download>Download</a>
+        <a class="copy-btn" href="/SKILL.md" download>Download</a>
       </div>
       <div class="block">
         <button type="button" class="copy-btn" data-copy="cfg-skill-install">Copy</button>
@@ -101,10 +101,10 @@
         <thead><tr><th>Document</th><th>URL</th><th>When to use it</th></tr></thead>
         <tbody>
           <tr><td><a href="/api.md">api.md</a></td><td><code class="inline" id="url-api-md"></code></td><td>You will drive termcp over HTTP yourself (REST/WebSocket): endpoints, bodies, output-cursor semantics.</td></tr>
-          <tr><td><a href="/skills.md">skills.md</a></td><td><code class="inline" id="url-skill-md"></code></td><td>Install once into a skills directory when the curl workflow should be available on demand in later tasks.</td></tr>
+          <tr><td><a href="/SKILL.md">SKILL.md</a></td><td><code class="inline" id="url-skill-md"></code></td><td>Install once into a skills directory when the curl workflow should be available on demand in later tasks.</td></tr>
         </tbody>
       </table>
-      <p class="muted">The skill is served flat at <code class="inline">/skills.md</code> (as guessable as <code class="inline">/api.md</code>), but it is a real Agent Skill: save it as <code class="inline">termcp/SKILL.md</code> — Claude Code reads <code class="inline">~/.claude/skills/</code>, other agents <code class="inline">~/.agents/skills/</code>. The folder name is what a skill loader discovers; restart the agent session afterwards.</p>
+      <p class="muted">The skill is served flat at <code class="inline">/SKILL.md</code> (as guessable as <code class="inline">/api.md</code>), but it is a real Agent Skill: save it as <code class="inline">termcp/SKILL.md</code> — Claude Code reads <code class="inline">~/.claude/skills/</code>, other agents <code class="inline">~/.agents/skills/</code>. The folder name is what a skill loader discovers; restart the agent session afterwards.</p>
     </div>
 
     <h2 id="clients">3. Client config</h2>
@@ -175,10 +175,10 @@
           <tr><td>GET / POST</td><td><code class="inline">/sse</code> + <code class="inline">/message</code></td><td>MCP SSE</td></tr>
           <tr><td>—</td><td><code class="inline">/stream</code></td><td>MCP Streamable HTTP</td></tr>
           <tr><td>GET</td><td><code class="inline">/api/ui/ws</code></td><td>Browser terminal WebSocket</td></tr>
-          <tr><td>GET</td><td><code class="inline">/api.md</code> · <code class="inline">/skills.md</code></td><td>Agent docs (markdown, no MCP needed; same docs as MCP resources)</td></tr>
+          <tr><td>GET</td><td><code class="inline">/api.md</code> · <code class="inline">/SKILL.md</code></td><td>Agent docs (markdown, no MCP needed; same docs as MCP resources)</td></tr>
         </tbody>
       </table>
-      <p class="muted">The API reference is <a href="/api.md">/api.md</a>; the curl skill is installable from <a href="/skills.md">/skills.md</a>.</p>
+      <p class="muted">The API reference is <a href="/api.md">/api.md</a>; the curl skill is installable from <a href="/SKILL.md">/SKILL.md</a>.</p>
     </div>
 
     <div class="card">
@@ -241,7 +241,7 @@
 
     // Agent-facing docs: same bytes over HTTP and as MCP resources. The skill
     // URL is the download address shown in the "Agent docs & skill" card.
-    var skill = origin + '/skills.md';
+    var skill = origin + '/SKILL.md';
     setText('url-skill', skill);
     setText('url-skill-md', skill);
     setText('url-api-md', origin + '/api.md');

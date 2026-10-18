@@ -22,7 +22,7 @@ import (
 // no-MCP integration path.
 var staticDocPaths = []string{
 	"/api.md",
-	"/skills.md",
+	"/SKILL.md",
 }
 
 // TestStaticDocsServed verifies the embedded docs are reachable at their paths.
@@ -80,7 +80,7 @@ func TestMarkdownContentTypeIsPlatformIndependent(t *testing.T) {
 // TestSkillFrontmatter validates the downloadable skill file against the Agent
 // Skills requirements (name + description in YAML frontmatter).
 func TestSkillFrontmatter(t *testing.T) {
-	b, err := readAsset("skills.md")
+	b, err := readAsset("SKILL.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,9 +213,9 @@ func TestApiPageShowsSkillDownload(t *testing.T) {
 	for _, want := range []string{
 		`id="url-skill"`,         // skill URL element (filled from origin by the page script)
 		`id="cfg-skill-install"`, // copy-ready install command
-		`href="/skills.md"`,      // direct download link
+		`href="/SKILL.md"`,      // direct download link
 		`href="/api.md"`,         // document link
-		`var skill = origin + '/skills.md'`,
+		`var skill = origin + '/SKILL.md'`,
 		`~/.claude/skills/`,      // Claude Code's skills dir (the only one CC actually reads)
 		`~/.agents/skills/`,      // shared convention for other agents
 		`"$DIR/termcp/SKILL.md"`, // install target: folder name = skill name

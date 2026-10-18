@@ -8,11 +8,11 @@ description: Drive the termcp terminal-platform over its HTTP REST API with curl
 Termcp is a terminal-session platform: one HTTP port serves REST, WebSocket and
 MCP. This skill uses curl only.
 
-The documentation endpoints (`/api.md`, `/skills.md`) are public: they work with
+The documentation endpoints (`/api.md`, `/SKILL.md`) are public: they work with
 no token. **API calls themselves need the token** whenever the instance runs with
 authentication enabled (see section 2).
 
-> Served at `<origin>/skills.md`. Install it by saving it into your agent's
+> Served at `<origin>/SKILL.md`. Install it by saving it into your agent's
 > skills directory as `termcp/SKILL.md` (the folder name is what gets discovered):
 >
 > - **Claude Code**: `~/.claude/skills/termcp/SKILL.md`
@@ -194,7 +194,7 @@ Bodies are in `/api.md`. Essentials:
 - `shell_id` ≠ `session_id`: terminal I/O (output-range / input / key / resize)
   takes `shell_id`.
 - With auth enabled, every API endpoint needs credentials (`/api.md` and
-  `/skills.md` are public and need none); keep tokens in headers only.
+  `/SKILL.md` are public and need none); keep tokens in headers only.
 - Password/sudo prompts belong to the human — never guess and paste secrets.
 - The instance's own `/api.md` is authoritative; this skill provides the
   workflow, not a frozen endpoint list.

@@ -182,7 +182,7 @@ func credentials(r *http.Request) []candidate {
 // the token.
 var publicPaths = map[string]struct{}{
 	"/api.md":        {},
-	"/skills.md":     {},
+	"/SKILL.md":     {},
 	"/extensions.md": {},
 }
 

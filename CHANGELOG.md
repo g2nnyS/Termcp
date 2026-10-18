@@ -2,9 +2,118 @@
 
 ## Unreleased
 
+### 变更
+
+- **MCP 工具面收成一个入口 `term`（#117）**。`tools/list` 从 32 个工具、约 22–25 KB 变成**一个**工具、约 2.0 KB，而且此后**不再随能力增长**：新增一种操作是在命令空间里加一条指令，不是在工具清单里加一行。`term` 只有 `cmd` 加八个窗口参数（`timeout` / `bytes_limit` / `lines_limit` / `total_bytes_limit` / 三个 `on_*_overflow` / `pipe_to` / `learn_mode`），`cmd` **非必填** —— 空调用返回引导：用法摘要 + 现在有什么可操作。
+
+  返回值是 HTTP 风味的信封（`TERM/1 <code> <reason>` 状态行 + 只出现有意义的头部 + 原始 body），同一份值另有一个 JSON 投影在 `structuredContent` 里，键集与头部一一对应，`body` 也原样包含在内。`Content-Range` 用 RFC 9110 形式，`end` 包含在内，所以 `end+1` 就是下一次的游标；被 `total_bytes_limit` 截断的 slot 会同时改写它，因为一个声称了 body 已不再携带的字节的 range，比没有 range 更坏。
+
+  指令语法是 shell 风味的一行（`run a1f3:1 ls -la`），用 `mvdan.cc/sh/v3/syntax` 只解析不求值，payload 按源码切片取出，所以 `$HOME` / `$(cmd)` / `'a'"b"'c'` 逐字节原样进入 shell。`;` 分隔多条指令（一条一个 slot），`&&` / `|` 留在 payload 里（那是一条命令）。逗号目标是一整个词，即一次批量。
+
+  **上下文保护变成默认值**：历史上只有 `shell_output` 有字节上限，其余 31 个工具的返回值没有任何体积限制（`session_list` / `message` / `file_read` / `ext list` 都能一次吐出任意大）。现在三个窗口轴对**每一个**指令生效，包括 `ps`、`info` 这类生成式回复。
+
+- **准入判断收成一张能力表（#117 A 类，纯重构，行为可观测面为零变化）**。新建 `internal/capability`，每行一个能力（`id`、`approval.Kind`、`paths`、`gate`、`idempotent`）。此前同一批操作有三个名字、准入判断散在五处：`tools.go` 的工具名清单、`approval_gate.go` 的 `gatedTools`、`extensions/preset.go` 的 `mcpAllow`、`internal/webui/restriction.go` 里 12 个调用点的硬编码字符串，以及 `handlers_shell.go` 里两处 `if shell.RequiresApproval()`。现在白名单、命名空间、审阅门控、路径范围、幂等性都问同一张表：`internal/session` 的 `Restriction.allow` 存**能力 id**（旧 manifest 里的工具名在加载时转换，继续可用），`internal/mcp/admission.go` 的 `checkAdmission` 是 MCP 唯一的准入点，`internal/webui` 的拒绝渲染也按能力 id。于是「同一操作经 `term`、经特化工具、经 REST、经 WebSocket 产生相同状态」不是靠自律，而是因为判定只有一处。
+
+- **32 个特化工具与它们的开关一并删除**。`tools.go`、`toolopts.go`（工具描述压缩表）、`--mcp-defer-tools` / `--mcp-defer-tools-level` / `--mcp-specialised-tools`、`RegisterSSHConfigWriteTools`（它只为改 schema 而存在，而 `term` 没有 schema 可改）全部移除。能力一个没少：handler 仍在，`term` 就是渲染它们的，所以「同一操作经 `term` 与经特化工具产生相同状态」这个要求退化成一句话——只有一条路径。
+
+  删掉的东西里有两段知识必须留下，它们搬到了 `help` 里（按需取，而不是每轮付账）：`profile` 导入文件的 TOML 形状与其陷阱（嵌套 `[connections.jump]` vs 被静默丢弃的扁平 `jump_host`）在 `help profile`；「问人类之前先 `notify`、然后等待而不是轮询」在 `help notify`；「人类在提示符前怎么等」在 `help watch`；`span` 的单字母状态在 `help span`。
+
 ### 新增
 
+- **`learn_mode` 与出错时的 `Usage`**。任何 `400` 都带 `Usage`（未知指令带整张指令表），因为出错正是调用方不知道形状的时刻；`learn_mode=true` 把命中的指令用法附在 slot 上，每条指令一次（批量里不重复）。成功回复默认**不带** `Usage`：已经会了就不该每轮付费。
+
+- **`alias` 指令**：`alias look read a1f3:1` 之后 `look` 就是那条指令，`Path` 显示展开后的模样。运行时别名活在本进程里，重启即失。
+
+- **`mcp` 指令**：把任意第三方 MCP server 当成一条通道驱动（`pipe <entry> --argv npx -y some-server` 之后 `mcp send` / `mcp recv` / `mcp tools` / `mcp call`），HTTP 端点则不消耗通道。
+
+- **`docs/mcp-tools.md` 重写**为 `term` 的指令参考（信封、三个窗口轴、指令表、错误码、能力层说明），`docs/api.md` 里指向 MCP 工具名的表述同步改为能力/指令。
+
+### 修复
+
+- **对单入口做全功能黑盒测试后修掉的一批表示与交互问题**：多 slot 的 `structuredContent` 改为 `{"slots":[…]}`（客户端要求顶层是对象，裸数组会让整条回复被丢弃）；生成式回复（`help`/`ps`/`info`/`detect`/各列表）也遵守 `bytes_limit=0` 与 `lines_limit`（截断给 206）；`mcp` 指令补齐 streamable HTTP 的 initialize/session 握手，`close` 真正删除句柄，非法 URL 与旧的 `/sse` 在 `open` 时即被拒绝；`span` 接受 session 级 handle；`ext`/`profile` 的位置子命令（`ext delete x`）不再被静默当成 list；`learn_mode` 对成功回复也附 `Usage`；`on_*_overflow` 的非法枚举被拒绝；`close` 的 Usage 改为 target-first；profile 写门控返回 403 而不是 500；内部 profile 被禁用时返回 409。
+- **只渲染 `structuredContent` 的 MCP 客户端看不到 body**。JSON 投影此前刻意不带 body（"text 里已经有了"），但客户端可以只渲染结构化结果——于是成功回复只剩状态行和头部，正文消失；报错反而正常，因为 `isError` 结果走文本。现在 `body` 同时放进结构化投影：两个投影各自完整，代价是正文在传输里各存一份。
+
+- **准入拒绝被当成成功吞掉了**。`callTool` 只看 transport error，不看 `res.IsError`，于是 namespace 隔离与模板白名单的拒绝（它们以 isError `result` 返回）被各指令渲染成 `204 No Content`/`200 OK`——命令**没有执行**，调用方却被告知执行了。修在源头：`callTool` 把 isError 结果转成同样的 `toolFailure`，二十多个调用点一次性修好。顺带修了状态码：`failureFromResult` 走 `extractErrorInfo` 取专用 `error_code`，否则每个拒绝都退化成 `operation_failed`(500) 而不是 403。
+
+- **`term` 把目标藏在 `cmd` 里，外层闸门看不到它**。guard 从 `shell_id`/`session_id` 参数反推会话，而单入口的参数是一个字符串——于是外层放行一切。现在 `runDirective` 在派发前对每条语句做 namespace 可达性检查（批量逐项、整批拒绝），覆盖那些直接查管理层、不经过 handler 的指令（`info`、`ps`、`span`、`close`、`resize`）。没有这一层，声明了 namespace 的调用方能读、能写、能关别人的会话。
+
+- **`Content-Range` 在被总量上限截断后说了谎**。`total_bytes_limit` 只截 body 却留着原来的 range，于是调用方按 `end+1` 续读时会跳过被截掉的那一段。现在 `Slot.Cut` 让两者一起动，截到零字节时退化成 `bytes */total`。
+
+- **窗口模型收成一个时间窗，`quiet_ms` 删除**。`run` 用位置读（`offset=start`）取命令输出，这条路径不阻塞；pty 又没有任何"命令结束"信号，于是快速命令经常先回 `204`，必须再补一次 `read`。现在按模式只用一个 `timeout`：pipe 等进程退出（提前返回），pty 等满时间窗再取（窗口就是采样时长），默认都是 **2s**。`quiet_ms` 从未被实现过，概念并入时间窗后直接删除。pty 是给人用的交互模式，一两秒的等待无感；多等一下能把回显、输出和提示符一次带回，省掉一次补读（对 AI 是一次完整的 turn）。
+
+- **默认值不再只藏在 schema 的 `default` 字段里**。窗口参数的默认值（`timeout` 2s、`bytes_limit` 8192、`lines_limit` 200、`total_bytes_limit` 32768、溢出策略 `truncate`）现在也写进参数描述本身：不同客户端对 `default` 字段的渲染并不一致，看不到就等于让调用方猜。`help <directive>` 里同样补上了行为性默认值：`read` 默认读新增字节/已关闭通道读尾部、`close --grace` 默认 5 秒、`watch` 默认 `--event output`/`--for 3`、`notify` 默认 `--level info`/toast 10 秒、`pipe --on-exit` 默认 `keep`。
+
+- **`exited` 在输出排空之前就发布了**。子通道的退出 watcher 先把状态置成 `exited`，再 `drainPipes`/`buf.Close`，于是"看到 exited 立刻 read"的命令会读到 `Content-Range: */0`——进程明明打印过，字节却还在传输缓冲里。现在先排空并封存缓冲区再置 `exited`：退出状态就是"输出已完整"的承诺，快速结束的管道命令也能读到尾巴。
+
+- **`watch` 省掉 `--channel` 不再报错**。文档一直说"省略由服务端决定"，handler 却直接拒绝。现在省略时按客户端能力选：声明 sampling 用 sampling，否则用任何客户端都能收的 resource。
+
+- **`pipe --argv` 在第一个词之后静默丢参数，引号也会被切坏**。flag 解析原来只取 `--argv` 后面的一个词，于是 `--argv echo hello` 只跑了 `echo`、`hello` 无声消失；`--argv 'sh -c "echo hi"'` 的分词又会把内层引号切碎，错误从 sh 冒出来而不是 termcp。现在 `--argv` 消费整行剩余部分，按 shell 引用规则分词（`--argv sh -c 'echo hi'` 是三个词），但不求值；`;`/`|`/`>` 这类命令行语法会被拒绝并给 `Usage`，而不是当文本塞给程序。其他 flag 必须写在 `--argv` 之前，裸 payload 也不再被静默忽略——两者都直接报 `400`，因为对 AI 来说"静默执行了错的命令"比报错难查得多。没有兼容特例：整段 argv 再包一层引号就是一个程序名，和终端里完全一样。
+
+- **连接者面板打开时是空的**。面板的列表只由「会话帧」驱动，而会话帧是**变更驱动**的：服务端在会话、连接者或标签页发生变化时才广播，静止的页面可能几分钟都不来一帧。于是打开面板时通常什么都没有发生 —— `renderClients` 在面板关着时直接返回（连签名都不记），打开面板又没有代码去画，`#clients-empty` 那句「还没有连接者」就单独留在空框里。**这看起来就是「没有连接者」，其实那个列表一直握在手上却被丢掉了**，而且你自己这个标签页本身就是一个 viewer，永远应该在列表里。现在帧到达时把两份列表记下来，面板的 `toggle` 事件用它们立即重画（`toggle` 而不是 click：`<details>` 也可能被键盘、页内查找、浏览器恢复状态打开，这三种都只发 `toggle`）。绘制与渲染路径拆成两个函数，所以「打开时画」与「帧来了才画」共用同一份签名去重，重复开合不会叠行。
+
+- **连接者的数字徽标去掉了**。顶栏那个数字几乎永远是 `0` 或 `1`，而它要表达的东西（谁连上来了）正是面板本身要说的 —— 一个要先解释「这个 1 不算你」才能读懂的计数不值得占位置。标签本身就是整个触发键，面板打开时报出全部。
+
+- **窄屏下连接者按钮收成图标**。手机上顶栏放不下文字：`clients-label` 在 `max-width: 768px` 下隐藏，按钮变成与其他键同尺寸的 32px 方块，只剩那个表示「有人在连着」的点。无障碍名不受影响 —— 标签 span 仍在（只隐藏，不删），`summary` 还带 `title` 与 `data-i18n-title`，所以提示气泡与屏幕阅读器读到的名字在每一种宽度下都没变。和 docs 链接、语言/主题键用的是同一条规则，主题自己的 `workspace.css` 副本一并跟上。
+
+- **批量 `shell_id` 绕过了白名单与命名空间隔离**。#80 让 `shell_id` 支持逗号批量，但 `#75` 的审阅白名单与 `#113` 的命名空间守卫都是按**整串**解析目标的：`GetChildShell("a,b")` 什么也找不到，而「找不到会话」在守卫里正是「无需拦截」的意思，于是整批被放行，handler 随后自己拆分并对每一项都执行了。也就是说**一个逗号就能同时掀开白名单和命名空间两层限制**。现在两个参数（`shell_id` / `session_id`）都先用同一个 `splitBatchIDs` 拆开，再逐项过两道闸；单 id 拆出来就是它自己，所以常见路径的行为完全没变。批量仍然**整批拒绝**：只做一部分会报成部分成功，而调用方无法从结果里判断哪几项落地了。
+
+- **连接者列表的「最旧的在前」其实是随机的**。排序键是 RFC3339 字符串，只到秒：两个客户端在同一秒接入时键相等，而 `sort.Slice` 对相等键不保证稳定，于是按 map 的遍历顺序输出。`connRegistry` 里本来就有 `seq`（注册序号）为此准备，现在用它作同秒时的次序。这不是只影响测试的现象：真实的一对客户端同秒接入时，面板的行序也会在两次刷新间跳动。
+
+- **`kind=mcp` + `url` 的模板通过 JSON 接口建不出来**。WebUI 的 JSON 创建与 MCP 的 `extension(action=create)` 都从 `extensions.Preset(kind)` 起步，而 `kind=mcp` 的预设带着 `npx -y example-mcp-server`。`ApplyArgs` 把作者给的 `url` 写在旁边就收工，`Validate` 随即以「url 和 command 二选一」拒绝 —— 作者根本没提过 command，被拒的理由却是他自己没犯的规则。TOML 编辑器侥幸能用（文档被字面读取，没有预设垫底），所以这个形态看起来存在，实际只有一条路可达。现在设置了 `url` 且调用方没有显式给 `command`/`args` 时清掉预设值；显式给的两者仍然相冲、仍然被拒，`update` 方向（stdio 模板改成端点）同样修好。
+
+- **连接者面板的计数与主题样式**。两件事，一个报告。
+
+  **数字不对**：徽标把**当前这个标签页**也数进去了。每个打开的页面本身就是一个 viewer，所以一个只开了你自己的实例永远显示 `1`，而「还没有连接者」的空态永远不会出现。现在服务端给调用方自己的那一行打 `self` 标记（按 WebSocket 行存 id，不是列表里的位置——位置会随标签页开关重编号），页面把它从**数字**里去掉、但仍列在面板里并标「当前标签页」（否则你无法确认这个列表本身是活的）。顺便修了 view 的 `id`：此前它是列表下标，开/关一个标签页就会把所有行的 id 挪位。
+
+  **赛博朋克没样式**：`themes/cyberpunk/assets/static/css/` 里存着一份自己的 `base.css`，而主题目录的副本会盖住共享的同一份文件（这正是主题覆盖机制的意义）。问题是它是一份**陈旧的分叉** —— 它是在连接者面板（以及更新提示、命名空间胶囊）加入之前拷走的，于是这三样只在赛博朋克主题里没样式。`approval.css`/`terminal.css`/`timeline.css` 同样只有末尾一个空行的差别，一并删掉改为继承共享块；主题自己的外观仍写在 `theme.css`。新增一条测试：任何主题如果覆盖了**结构性**样式块（base/approval/terminal/timeline）却缺少共享副本里的行，就失败——调色板类块（tokens/theme/workspace）的主题差异是它们的本职，不检查。
+
+### 新增
+
+- **配置导出可以设密码（#108 的第三项）**。`GET /api/connections/batch` 带上 `X-Termcp-Password` 头就导出一份加密文件（`TERMCP-ENC 1` 头 + base64 的 salt ‖ nonce ‖ AES-256-GCM 密文，按 64 列折行），导入时在同一个头里给密码就能打开。密码放**头**而不是 query：URL 会进 shell history、代理日志、浏览器历史，写在里面的密码和使用它的那一个动作就把它泄了。不带这个头就是原来那份明文 TOML，旧脚本与旧导出文件不受影响。
+
+  为什么值得单独一个头：明文导出里装着凭据，而它的用途就是**离开这台机器**。没有密码时那份文件里什么都读不到；密码错了是被认证拒绝（GCM 验签）而不是解出一堆乱码；文件被改过也打不开。缺密码导入给 401 并指名该用哪个头，而不是把密文丢给 TOML 解析器报一个满屏 base64 里的语法错。
+
+  **这一项不是「本地配置加密」本身**（#108 的第一、二项）：那是另一件事——靠 OS 钥匙串透明地加密磁盘上的文件、容器里要有退路、且对用户不可见。这里解决的是「把配置带到另一台机器」，两者威胁模型不同。
+
+- **调用方命名空间：多 agent 共用实例时不再互相踩**。MCP 请求带一个 `X-Termcp-Namespace: <name>` 头，这个调用方就被圈进自己的命名空间：`session_start` 建的会话打上 `ns:<name>` 标记（随 manifest 持久化，重启后仍在），`session_list` **只返回自己的**会话，按 id 驱动别人的会话是 `forbidden` 而不是“找不到”（后者会让人去查自己的 id）。名字限字母/数字/`-_.`、最长 64；非法值不会静默降级为“无命名空间”（那会反而把共享视图交出去），而是拒绝一切会话。
+
+  **未声明命名空间 = 实例所有者，不是租户**：浏览器、stdio 桥、没设头的 agent 保持今天的行为，包括“扩展会话不出现在 `session_list` 里，但已有 id 仍可用”这条扩展文档已经承诺的契约。这个特性解决的是两个 agent 互相冲突，而不是向所有者隐藏 agent —— 所以眼前的 agent 会话仍会出现在面板上，只是多一个名字胶囊告诉你它属于谁。基础设施（扩展层）会话对命名空间调用方一律拒绝：否则一个租户就能去驱动所有扩展共享的那个 MCP server。
+
+  两半必须同时成立，而它们问的是不同的问题：`ns.Listable`（列表看不看得见）与 `ns.Reachable`（按 id 碰不碰得到）。只过滤列表是一层帘子 —— 一个从日志、截图或上一轮对话里拿到过的 id 就能掀开。`ns:` 前缀把调用方空间与 termcp 自己的基础设施空间（`ext:`）拆成不相交的两半，所以“agent 声称自己叫 ext”不会被当成扩展层。
+
+- **扩展可以直接接一个 HTTP MCP 端点，不另外起进程**。`kind=mcp` 的模板现在可以给 `url`（可选 `headers`）而不是 `command`/`args`：termcp 自己的桥跑在会话那条 pipe 通道上，把行协议转发到端点，因此**哪个主机上都不需要装第二个二进制、也不需要 PATH 里有 termcp**，凭据也不用写进命令行。路径以 `/sse` 结尾选 SSE 传输，其余走 streamable HTTP；`headers` 是每个请求都带的，服务端要 `X-Api-Key` 这类 header 就写这里。因为桥是 termcp 自己的进程，这种模板要求 `target = "internal"`（端点从本机可达），`url` 与 `command` 互斥，两者都写或都不写给 `mode=pipe` 都会在保存时被拒。
+
+- **内置命令（in-process command）**：内置 SSH server 现在可以注册“在自己进程里服务”的命令，客户端 exec 到这个名字时不会 fork、也不会查 PATH，而是直接把通道交给注册的 handler（`sshserver.Server.RegisterCommand`）。`termcp-mcp-bridge` 是第一个用户，也是上面那条扩展的载体——`internal/mcpbridge` 的桥因此能被复用成通道上的一个“程序”，而不是只能作为一个独立进程存在。桥同时支持自定义 header（`Config.Headers`）。
+
+- **`extensions.md` 与 `extension` 工具补上端点形态**：`url`/`headers` 进了工具 schema（`{}` 清空 headers），`action=get` 会返回这两个字段，Web UI 的新建模板注释里也给出了现成写法；`kind=mcp` + `url` 的模板会自动带上描述端点形态的 notes（作者自己写的 notes 永不被覆盖，只有仍是预设文本的才会随形态更新）。
+
 - **下载 URL 可以指定响应 header**。`file_urls` 新增 `response_headers`（对象，如 `{"Content-Disposition": "attachment; filename=\"x.png\""}`），它被拼进返回的 `download_url` 的 query（`?h.<Name>=<value>`），所以**谁打开这个链接都会带上它** —— curl、浏览器、转发给别人的链接，不需要另外约定一个通道传 header。REST 侧对应 `GET /api/sessions/{id}/files/download` 的同名参数；名字不是合法 HTTP token、值不是字符串、或值里带换行会 400（header 注入），`Content-Length`/`Content-Range`/`Transfer-Encoding`/`Connection`/`Trailer` 属于服务端、请求了也会被丢弃，其馀同名 header 覆盖服务端默认值。
+
+- **页面会提示有新版本（#106）**。顶栏读一次 GitHub 的 release 列表，当前构建比最新正式版旧时就挂一个「vX.Y.Z 已发布」的胶囊，点开是 release 页面，关掉之后这个版本不再提。**只比较真正的 `vX.Y.Z`**：`make` 给非 tag 构建打的 `dev-<sha>`／`dev-<sha>-dirty` 在版本序里没有位置，拿它去比会在每次本地构建时都喊更新、且每次都错，所以这类构建一声不吭；预发布版（`v0.2.8-rc.1`）当作它所对应的那个版本处理——正式版发布时会提示，不会被推去「升级」到更旧的版本。比较按数字逐段做（按字符串比的话 `0.2.10` 比 `0.2.9` 还小，正好是下一次发布的那个版本）。查不到、限流、断网、api.github.com 被拦，全都安静地什么都不发生。
+
+- **页面上能看到谁连上来了（#99）**。顶栏多一个「连接者」下拉，分两栏列出**驱动会话的 MCP 客户端**（它 initialize 时自报的名字与版本、它声明的命名空间、接入时间）和**看着页面的浏览器标签页**（来源地址、浏览器、正在 stream 几个会话）。两者是不同传输、不同生命周期，所以分成两种行而不是塞进一个带 kind 字段、一半字段为空的形状。
+
+  MCP 那一半靠 mcp-go 的 session 钩子：库里只有按 id 取单个 session 的接口，没有「列出有哪些连接」的方法，所以维护一张由 register/unregister 喂的小表。**客户端的名字不是注册时就知道的** —— mcp-go 先应答 initialize 再注册 session，注册钩子里读名字对每个客户端都会是空的，所以行里存的是 session 对象、读的时候再取；同理，命名空间声明随 initialize 请求到达，比行存在得更早，得先存着等注册来接。浏览器那一半只登记 WebSocket 标签页：普通 HTTP 请求没有生命周期，列出来就是把「刚才有人来过」说成「现在连着」，而这恰好是这个面板要消除的混淆。
+
+  两个列表跟着 sessions 帧走，不额外轮询；面板关着时只更新数字不重建 DOM，内容没变时跳过重建（流式输出时帧是每秒很多次的）。新增 `GET /api/clients`。
+
+- **审阅模式可以只挡一部分操作（#75）**。此前是一个开关：打开就挡住 agent 的全部写入（命令、文件、端口转发）。现在可以点名挡哪些 kind —— `{"enabled": true, "scopes": ["file_write","file_delete"]}` —— 没被点到的直接放行；不写就等于全部，和今天一样，所以默认行为不变。
+
+  两个细节决定了它可不可信：**拼错的名字是错误，不是被静默丢掉**（一个悄悄缩小到空的门禁，比一个拒绝配置的门禁更糟）；**范围外的东西必须真的穿过**——只挡文件的会话要能开端口转发，只挡命令的会话要能写文件。后一个方向最容易写错：一个查「审阅模式开没开」而不是「这个 kind 挡没挡」的检查，在 UI 上看起来完全一样（锁是锁上的），只会表现为 agent 被挡在一件本来允许的事情外面。开/关隧道是两个独立的 kind，因为它们是两个决定。
+
+  锁的 tooltip 会写出被限制的范围，`GET/PATCH /api/sessions/{id}/approval` 的 `scopes` 字段（`"all"` 或列表）与 session 快照的 `approval_scopes` 让这个范围可见——操作员确认不了的范围，就是他们不该信任的门禁。
+
+- **能看见 agent 在什么时候对哪个会话做了什么（#110）**。新增 `GET /api/activity`：跨**所有**会话的最近动作，最新在前，每行带会话名、shell、毫秒时间、谁做的（`ai` / `human` / `system`）、做了什么，以及这个动作的输出在日志里的字节偏移——所以一行就能跳进那段转录。
+
+  没有新的记录：数据本来就在每个 shell 的 `log.jsonl` 里（终端时间线的那些 mark：`a` agent 输入、`i` 人输入、`q`/`A` 审阅请求与放行），此前只能一个终端一个终端地看。**输出片段刻意不进这个信息流** —— 每条命令都会产生输出，一个 `find` 就能刷几千行，把它们放进去只会把读者真正要找的那几行埋掉；要看结果就用那一行的 `bytes` 去取。支持 `limit`（默认 200，上限 2000）、`since_ms`（翻页而不必重读）、`session_id`（只看一个会话）；参数非法是 400 而不是静默取默认值。
+
+  **token 消耗没有做**：termcp 看不到 agent 的 token（那是模型客户端的事），任何数字都只能是编的。
+
+- **一条命令可以同时发给一批 shell（#80）**。`shell_input` 与 `shell_key` 的 `shell_id` 现在接受逗号分隔的列表（与 `session_terminate`/`session_delete` 已在用的批量形式一致），所以「登录十台机器都跑一遍」是一次调用而不是十次——agent 的稀缺资源是回合，不是调用。每项**独立尝试**：一台 shell 失效不会挡住其余九台，回包是 `{results:[{shell_id, ok, ...}]}`，每项带自己所持有的回执（`offset`/`total_lines`/`line`）。**单个 id 的回包形状完全不变**（没有 `results` 外壳），只对一个 shell 输入的调用方不用改代码；受审阅模式拦截的项在结果里带 `approved: false` + `review_pending: true`，与单次调用同一个构造函数，所以模型不会看到同一个状态的两种写法。
+
+- **`notify_user` 现在会响，系统通知也真的能弹出来（#94）**。两个症状是同一个原因：声音和通知权限都只在**用户手势**里才被浏览器允许，而通知是从 WebSocket 推过来的，不算手势。于是权限申请被静默忽略（`Notification.permission` 永远停在 `default`，桌面通知一次都没弹出来过），音频通道也一直是 `suspended`。现在页面在**第一次点击或按键**时申请一次权限、并当场打开音频通道（每次页面加载一次，已经在通知路径里那次无效申请删掉了）；提示音用 Web Audio 现场合成两声短音（`warn`/`error` 音高不同），不是音频文件，省一次请求也绕开 `<audio>` 的自动播放策略。没交互过的页面只有 toast，这跟“没有页面打开”不是一回事。
+
+- **终端里叠在一起的颜色不再看不见字**。十六个 ANSI 色里有八个直接取自 UI 的语义色（`--danger`、`--success`……），它们是照着页面底色挑的，彼此之间毫无关系：浅色主题下 `ls` 给「其他人可写目录」的 `34;42`（蓝字、绿底）两个槽正好是同一个颜色，对比度 **1.00** —— 字就在自己的背景里。现在把 xterm 自带的 `minimumContrastRatio` 打开（默认 4.5，即 WCAG AA 正常文字的下限），由 xterm 在渲染时只移动文字色的明度来保证每个格子可读，16 色、256 色立方与真彩色一律适用；没有去手改那十六个十六进制值，因为那既救不了程序自己挑的颜色，也救不了 256 色。想让某个主题自己定，在 `theme.json` 里写 `minimumContrastRatio`（1–21，`1` 关闭）。
 
 ## v0.2.8-rc.1 — 2026-10-15
 
