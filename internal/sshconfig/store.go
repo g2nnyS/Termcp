@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/open-mcp-ai/termcp/internal/vault"
 )
 
 // ErrNotFound reports that a named ssh config does not exist. Callers can
@@ -23,11 +25,28 @@ var ErrReserved = errors.New("reserved ssh config")
 
 // Store manages dataDir/ssh_configs/<name>/config.toml for remote profiles.
 // The built-in "internal" profile is virtual: it is never written to disk.
+//
+// When the data directory holds a vault (SetVault with an initialized
+// vault.Vault), remote profiles live encrypted under vault/ssh_configs/
+// instead: Save seals, Load opens, and the plaintext path is only a read
+// fallback for not-yet-migrated profiles. The store never refuses plaintext
+// operation on a vault-less data directory — a deployment without a vault
+// behaves exactly as before.
 type Store struct {
 	dataDir   string
 	mu        sync.Mutex
 	temporary map[string][]byte // process-local profiles; guarded by mu
 	onChange  atomic.Value      // func(), set via SetOnChange, called after Save/Delete/Rename
+	vault     *vault.Vault      // nil until SetVault
+}
+
+// SetVault attaches the credential vault rooted at the same data directory.
+// Called once at wiring time (main.go); the vault's lock state is consulted
+// per operation, not cached.
+func (s *Store) SetVault(v *vault.Vault) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.vault = v
 }
 
 // SetOnChange registers a callback fired after Save, Delete, or Rename succeeds.
@@ -102,9 +121,20 @@ func (s *Store) Load(name string) (*Entry, error) {
 	s.mu.Lock()
 	data, inMemory := s.temporary[name]
 	data = append([]byte(nil), data...)
+	vt := s.vault
 	s.mu.Unlock()
 	if inMemory {
 		return ParseAndValidate(data)
+	}
+	if vt != nil && vt.Exists() && vt.Has(name) {
+		// A vaulted profile decrypts at load time; a locked vault fails the
+		// load with vault.ErrLocked, which session_start surfaces as unlock
+		// guidance rather than a dial error.
+		plain, err := vt.Decrypt(name)
+		if err != nil {
+			return nil, err
+		}
+		return ParseAndValidate(plain)
 	}
 	data, err = os.ReadFile(p)
 	if err != nil {
@@ -140,9 +170,16 @@ func (s *Store) ReadRaw(name string) ([]byte, error) {
 	s.mu.Lock()
 	data, inMemory := s.temporary[name]
 	data = append([]byte(nil), data...)
+	vt := s.vault
 	s.mu.Unlock()
 	if inMemory {
 		return data, nil
+	}
+	if vt != nil && vt.Exists() && vt.Has(name) {
+		// ReadRaw feeds the operator's own edit form, so a vaulted profile
+		// decrypts here when the vault is unlocked — the same trust the
+		// operator's keyboard already has. Locked vaults answer ErrLocked.
+		return vt.Decrypt(name)
 	}
 	data, err = os.ReadFile(p)
 	if err != nil {
@@ -154,14 +191,17 @@ func (s *Store) ReadRaw(name string) ([]byte, error) {
 	return data, nil
 }
 
-// List returns sorted config names: virtual "internal", temporary profiles, and profiles on disk.
+// List returns sorted config names: virtual "internal", temporary profiles,
+// vaulted profiles, and profiles on disk. Vaulted names are visible while
+// locked — the filename is the profile name by design.
 // Leftover ssh_configs/internal/ directories are ignored.
 func (s *Store) List() ([]string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	vt := s.vault
 	entries, err := os.ReadDir(s.root())
 	if err != nil {
 		if !os.IsNotExist(err) {
+			s.mu.Unlock()
 			return nil, err
 		}
 	}
@@ -170,6 +210,19 @@ func (s *Store) List() ([]string, error) {
 	for name := range s.temporary {
 		names = append(names, name)
 		seen[name] = true
+	}
+	s.mu.Unlock()
+	if vt != nil && vt.Exists() {
+		vaulted, err := vt.List()
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range vaulted {
+			if !seen[name] {
+				names = append(names, name)
+				seen[name] = true
+			}
+		}
 	}
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
@@ -224,31 +277,61 @@ func (s *Store) SaveWithOptions(name string, data []byte, temporary bool) error 
 	if err := ValidateName(name); err != nil {
 		return err
 	}
+	p := filepath.Join(s.root(), name, "config.toml")
+
+	// The mutex guards the temporary map and the collision check only; file
+	// I/O runs unlocked because both writers finish with an atomic rename, so
+	// a concurrent Save of the same name degrades to last-writer-wins instead
+	// of a corrupted file.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := s.checkNameCollisionLocked(name, name); err != nil {
+		s.mu.Unlock()
 		return err
 	}
-	p := filepath.Join(s.root(), name, "config.toml")
+	vt := s.vault
+	useVault := vt != nil && vt.Exists()
 	if temporary {
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		_ = os.Remove(filepath.Dir(p))
 		if s.temporary == nil {
 			s.temporary = make(map[string][]byte)
 		}
 		s.temporary[name] = append([]byte(nil), data...)
+	}
+	s.mu.Unlock()
+
+	if temporary {
+		// A temporary profile supersedes any disk or vaulted copy in Load
+		// order; removing those copies keeps that unambiguous.
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = os.Remove(filepath.Dir(p))
+		if vt != nil {
+			_ = vt.Delete(name)
+		}
 		s.notifyChange()
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
-		return err
+	if useVault {
+		// Sealing replaces the plaintext file: leaving the TOML next to the
+		// ciphertext would keep the secret one `cat` away from gone.
+		if err := vt.Encrypt(name, data); err != nil {
+			return err
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		_ = os.Remove(filepath.Dir(p))
+	} else {
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(p, data); err != nil {
+			return err
+		}
 	}
-	if err := writeFileAtomic(p, data); err != nil {
-		return err
-	}
+	s.mu.Lock()
 	delete(s.temporary, name)
+	s.mu.Unlock()
 	s.notifyChange()
 	return nil
 }
@@ -353,6 +436,30 @@ func (s *Store) Rename(oldName, newName string) error {
 		return nil
 	}
 
+	// A vaulted profile moves by re-sealing under the new name; the vault's
+	// ErrLocked passes straight through, since a rename is exactly where a
+	// caller learns the vault must be unlocked first.
+	if vt := s.vault; vt != nil && vt.Exists() && vt.Has(oldName) {
+		if vt.Has(newName) {
+			return fmt.Errorf("config already exists: %s", newName)
+		}
+		plain, err := vt.Decrypt(oldName)
+		if err != nil {
+			return err
+		}
+		if err := vt.Encrypt(newName, plain); err != nil {
+			return err
+		}
+		if err := vt.Delete(oldName); err != nil {
+			return err
+		}
+		// A stale plaintext copy under the old name must not survive the move.
+		_ = os.Remove(oldPath)
+		_ = os.Remove(filepath.Dir(oldPath))
+		s.notifyChange()
+		return nil
+	}
+
 	oldDir := filepath.Dir(oldPath)
 	newDir := filepath.Dir(newPath)
 	if st, err := os.Stat(oldPath); err != nil {
@@ -391,8 +498,12 @@ func (s *Store) Delete(name string) error {
 	}
 	dir := filepath.Dir(p)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	vt := s.vault
 	delete(s.temporary, name)
+	s.mu.Unlock()
+	if vt != nil && vt.Exists() {
+		_ = vt.Delete(name)
+	}
 	if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 		return err
 	}

@@ -33,6 +33,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 	"github.com/open-mcp-ai/termcp/internal/sshserver"
 	"github.com/open-mcp-ai/termcp/internal/storage"
+	"github.com/open-mcp-ai/termcp/internal/vault"
 	"github.com/open-mcp-ai/termcp/internal/webui"
 )
 
@@ -351,6 +352,11 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	}
 
 	sshStore := sshconfig.NewStore(cfg.DataDir)
+	// The vault attaches unlocked-state-aware: its mere presence redirects
+	// profile writes into ciphertext, while reads fall back to plaintext for
+	// profiles not yet migrated. Unlock happens through the `termcp vault`
+	// CLI / unlock endpoints; nothing here auto-unlocks.
+	sshStore.SetVault(vault.New(cfg.DataDir))
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	mux := http.NewServeMux()

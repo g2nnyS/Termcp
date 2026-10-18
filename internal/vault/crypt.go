@@ -93,6 +93,17 @@ func (v *Vault) Delete(profileName string) error {
 	return nil
 }
 
+// Has reports whether a sealed profile file exists for the name. It answers
+// without unlocking: the filename is the profile name, so presence is public.
+func (v *Vault) Has(profileName string) bool {
+	path, err := v.profilePath(profileName)
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(path)
+	return err == nil
+}
+
 // List returns the sealed profile names, without unlocking. The filename IS
 // the profile name by design (design doc §三): the initial format keeps a
 // single track instead of a plaintext metadata index.

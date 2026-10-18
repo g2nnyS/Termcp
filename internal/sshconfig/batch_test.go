@@ -47,20 +47,20 @@ func TestBatchImportExportAndTemporaryLifetime(t *testing.T) {
 	if err != nil || !entry.DefaultApproval || entry.Jump == nil || entry.Jump.Host != "jump.example" {
 		t.Fatalf("temporary load lost fields: %+v %v", entry, err)
 	}
-	exported, err := s.ExportBatch(nil)
+	exported, err := s.ExportBatch(nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(exported), "internal") {
+	if strings.Contains(string(exported.Document), "internal") {
 		t.Fatal("export included built-in internal profile")
 	}
 	restarted := NewStore(dir)
 	if _, err := restarted.Load("alpha"); !errors.Is(err, ErrNotFound) {
 		t.Fatal("temporary profile survived a new store")
 	}
-	result, err = restarted.ImportBatch(exported, false)
+	result, err = restarted.ImportBatch(exported.Document, false)
 	if err != nil || result.Imported != 2 || len(result.Renamed) != 0 {
-		t.Fatalf("persistent import of export: result=%+v err=%v\n%s", result, err, exported)
+		t.Fatalf("persistent import of export: result=%+v err=%v\n%s", result, err, exported.Document)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "ssh_configs", "alpha", "config.toml")); err != nil {
 		t.Fatal(err)

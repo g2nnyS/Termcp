@@ -21,13 +21,28 @@ type BatchImportResult struct {
 	Renamed  []BatchRename `json:"renamed,omitempty"`
 }
 
+// BatchExportResult carries the exported document plus the names withheld
+// from it, so the caller can warn instead of silently dropping profiles.
+type BatchExportResult struct {
+	Document []byte
+	// SkippedVaulted names the vaulted profiles a plaintext export refused to
+	// carry: exporting a vaulted profile as cleartext would defeat the vault.
+	// Sealed exports (sealed=true) include them, decrypted under the open
+	// vault into the password-protected envelope.
+	SkippedVaulted []string
+}
+
 // ExportBatch returns a TOML document containing remote profiles, including
 // temporary ones. An empty only exports every stored profile; otherwise exactly
 // the named ones are exported — a name that does not resolve is skipped rather
 // than failing the whole file, so a selection captured before a deletion still
 // downloads. The built-in internal profile is intentionally excluded in both
 // modes (the KindRemote filter below is what drops it).
-func (s *Store) ExportBatch(only []string) ([]byte, error) {
+//
+// Vaulted profiles follow sealed: false withholds them (listed in
+// SkippedVaulted); true decrypts them inline, so a sealed export with a locked
+// vault fails with vault.ErrLocked rather than dropping profiles quietly.
+func (s *Store) ExportBatch(only []string, sealed bool) (*BatchExportResult, error) {
 	names := only
 	if len(names) == 0 {
 		list, err := s.List()
@@ -36,9 +51,18 @@ func (s *Store) ExportBatch(only []string) ([]byte, error) {
 		}
 		names = list
 	}
+	s.mu.Lock()
+	vt := s.vault
+	s.mu.Unlock()
+	res := &BatchExportResult{}
 	profiles := make([]map[string]any, 0, len(names))
 	for _, name := range names {
 		if IsInternalName(name) {
+			continue
+		}
+		vaulted := vt != nil && vt.Exists() && vt.Has(name)
+		if vaulted && !sealed {
+			res.SkippedVaulted = append(res.SkippedVaulted, name)
 			continue
 		}
 		raw, err := s.ReadRaw(name)
@@ -62,9 +86,14 @@ func (s *Store) ExportBatch(only []string) ([]byte, error) {
 		profile["name"] = name
 		profiles = append(profiles, profile)
 	}
-	return toml.Marshal(struct {
+	doc, err := toml.Marshal(struct {
 		Connections []map[string]any `toml:"connections"`
 	}{Connections: profiles})
+	if err != nil {
+		return nil, err
+	}
+	res.Document = doc
+	return res, nil
 }
 
 // ImportBatch validates the entire TOML document, then assigns unique names

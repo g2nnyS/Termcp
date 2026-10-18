@@ -13,6 +13,7 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
+	"github.com/open-mcp-ai/termcp/internal/vault"
 )
 
 type connectionSummary struct {
@@ -88,6 +89,10 @@ func (h *Handler) handleGetConnection(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			http.NotFound(w, r)
+			return
+		}
+		if errors.Is(err, vault.ErrLocked) {
+			http.Error(w, "the vault is locked: unlock it to edit a vaulted profile", http.StatusConflict)
 			return
 		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -183,10 +188,22 @@ func (h *Handler) handleExportConnections(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-	data, err := h.SSH.ExportBatch(only)
+	sealed := r.Header.Get(EncryptHeader) != ""
+	res, err := h.SSH.ExportBatch(only, sealed)
 	if err != nil {
+		if errors.Is(err, vault.ErrLocked) {
+			http.Error(w, "the vault is locked: unlock it before exporting vaulted profiles", http.StatusConflict)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	data := res.Document
+	if len(res.SkippedVaulted) > 0 {
+		// Plaintext export withholds vaulted profiles (see ExportBatch). The
+		// header names them so the UI can warn instead of producing a file the
+		// operator believes is complete.
+		w.Header().Set("X-Termcp-Skipped-Vaulted", strings.Join(res.SkippedVaulted, ","))
 	}
 
 	/* An export leaves the machine, so it can be sealed with a password the
