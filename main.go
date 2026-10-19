@@ -433,6 +433,14 @@ func runServer(cfg *config.Config, idleTimeoutArg string, idleTimeout time.Durat
 	mux.Handle("GET /sse", mcpSrv.SSEHandler())
 	mux.Handle("POST /message", mcpSrv.MessageHandler())
 	mux.Handle("/stream", mcpSrv.StreamableHTTPHandler())
+	// The REST entrance to the same command space: POST /api/term takes the term
+	// tool's argument object and answers the same envelope. Mounted here rather
+	// than by webuiH because admission and the namespace claim live in internal/mcp
+	// — a second copy on the other side of the import cycle would be a second
+	// place to get admission wrong. A pattern the Web UI owns wins over this one
+	// (it registers later, and ServeMux refuses overlaps rather than overriding),
+	// so no existing route can be shadowed by it.
+	mux.Handle("POST /api/term", mcpSrv.TermHandler())
 	webuiH := &webui.Handler{Sessions: sessMgr, MsgMgr: msgMgr, SSH: sshStore, ForwardMgr: forwardMgr, NotifyMgr: mcpSrv.NotifyManager(), Extensions: extReconciler, NoInternal: cfg.NoInternal, Version: versionString(), Daemon: isDaemonChild, StartedAt: time.Now().UTC().Format(time.RFC3339), Vault: credVault, Tokens: tokenStore}
 	// The effective countdown is published at GET /api/daemon so the stdio
 	// bridge can ping faster than it (see daemon.InstanceInfo.IdleTimeoutMS).

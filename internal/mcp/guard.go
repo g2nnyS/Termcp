@@ -5,6 +5,7 @@ import (
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 )
@@ -187,11 +188,16 @@ func (g toolGuard) sessionForRuleID(id string) *session.Session {
 }
 
 // sessionForShellID resolves a shell_id argument the way requireShell does: a
-// live or retained shell id, a raw session id (its primary channel), or a
-// termcp:// locator naming either. It deliberately does not apply
-// requireShell's status check — a closed session's retained shell is still the
-// container whose whitelist governs a read of its output, and letting the guard
-// skip it would leave that path ungated.
+// live or retained shell id, a raw session id (its primary channel), a
+// termcp:// locator naming either, or the short `sid:N` handle `ps` prints. It
+// deliberately does not apply requireShell's status check — a closed session's
+// retained shell is still the container whose whitelist governs a read of its
+// output, and letting the guard skip it would leave that path ungated.
+//
+// Recognising every spelling requireShell recognises is a SECURITY requirement,
+// not a convenience: checkEach SKIPS an id that resolves to nothing (that is the
+// handler's not-found error to report), so any spelling the handler accepts but
+// this function does not is a hole straight through the whitelist.
 func (g toolGuard) sessionForShellID(shellID string) *session.Session {
 	if cs := g.server.sessMgr.GetChildShell(shellID); cs != nil {
 		return g.server.sessMgr.Get(cs.ParentSessionID())
@@ -206,7 +212,9 @@ func (g toolGuard) sessionForShellID(shellID string) *session.Session {
 }
 
 // sessionForSessionID resolves a session_id argument the way requireSession
-// does: a raw session id, a shell id belonging to it, or a termcp:// locator.
+// does: a raw session id, a shell id belonging to it, a termcp:// locator, or the
+// short `sid:N` handle. The same security note applies: a spelling the resolver
+// misses is a spelling the guard does not gate.
 func (g toolGuard) sessionForSessionID(id string) *session.Session {
 	if sess := g.server.sessMgr.Get(id); sess != nil {
 		return sess
@@ -219,6 +227,14 @@ func (g toolGuard) sessionForSessionID(id string) *session.Session {
 		if err == nil && p.Kind != resourceURLEntry {
 			return g.server.sessMgr.Get(p.SessionID)
 		}
+		return nil
+	}
+	// The short handle from ps. Without this, `shell_id: "sid:2"` resolved here to
+	// nothing, checkEach skipped it as "no session to gate", and the call went on
+	// to a handler that DOES understand the spelling — the whitelist bypassed by
+	// punctuation.
+	if h := locator.SplitHandle(id); h.Index > 0 {
+		return g.server.sessMgr.Get(h.SessionID)
 	}
 	return nil
 }

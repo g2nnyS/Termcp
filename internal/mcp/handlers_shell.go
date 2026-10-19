@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/capability"
 	"github.com/open-mcp-ai/termcp/internal/clock"
+	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/internal/sshclient"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
@@ -130,7 +131,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 			if bad != nil {
 				return nil, bad
 			}
-			res, bad := s.writeShellInput(shell, text)
+			res, bad := s.writeShellInput(ctx, shell, text)
 			return res, bad
 		}), nil
 	}
@@ -146,7 +147,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 	// input's echo will begin — the one per-call anchor a line-protocol consumer
 	// needs to pair a later response with its request. A failed lookup only
 	// costs the field, never the write: the index is advisory, the send is not.
-	res, bad := s.writeShellInput(shell, text)
+	res, bad := s.writeShellInput(ctx, shell, text)
 	if bad != nil {
 		return bad, nil
 	}
@@ -156,7 +157,7 @@ func (s *Server) handleSendInput(ctx context.Context, request mcpgo.CallToolRequ
 // writeShellInput is the single-shell write shared by the one-id and batch
 // paths, so the two cannot drift: the offset/line bookkeeping, the review stage
 // and the AI tagging are identical whether one shell is addressed or ten.
-func (s *Server) writeShellInput(shell *session.ChildShell, text string) (map[string]any, *mcpgo.CallToolResult) {
+func (s *Server) writeShellInput(ctx context.Context, shell *session.ChildShell, text string) (map[string]any, *mcpgo.CallToolResult) {
 	result := map[string]any{"success": true}
 	sessID := shell.ParentSessionID()
 	if offset, err := s.sessMgr.OutputSize(sessID, shell.ID); err == nil {
@@ -183,7 +184,7 @@ func (s *Server) writeShellInput(shell *session.ChildShell, text string) (map[st
 	// two places where review was gated from inside a handler, so a new reviewable
 	// operation was covered only if someone remembered to add a third.
 	if s.reviewHolds(shell) {
-		if err := shell.StageForApproval("mcp", text); err != nil {
+		if err := shell.StageForApproval(callerSource(ctx), text); err != nil {
 			return nil, toolError(CodeOperationFailed, "%s", err.Error())
 		}
 		// The staged case is not a write that happened, so the reply is the
@@ -195,7 +196,7 @@ func (s *Server) writeShellInput(shell *session.ChildShell, text string) (map[st
 
 	// An agent's keystrokes are tagged as AI input, so a transcript can say who
 	// typed what. The bytes themselves reach the log through the terminal's echo.
-	if err := shell.SendTerminalBytesFrom([]byte(text), false, session.InputFromAI); err != nil {
+	if err := shell.SendTerminalBytesFrom([]byte(text), false, callerInputSource(ctx)); err != nil {
 		return nil, toolError(CodeOperationFailed, "%s", err.Error())
 	}
 	return result, nil
@@ -218,7 +219,7 @@ func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolReque
 			if bad != nil {
 				return nil, bad
 			}
-			return s.pressShellKey(shell, key, repeat)
+			return s.pressShellKey(ctx, shell, key, repeat)
 		}), nil
 	}
 
@@ -226,7 +227,7 @@ func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolReque
 	if bad != nil {
 		return bad, nil
 	}
-	res, bad := s.pressShellKey(shell, key, repeat)
+	res, bad := s.pressShellKey(ctx, shell, key, repeat)
 	if bad != nil {
 		return bad, nil
 	}
@@ -238,19 +239,19 @@ func (s *Server) handlePressKey(ctx context.Context, request mcpgo.CallToolReque
 
 // pressShellKey is the single-shell key press shared by the one-id and batch
 // paths.
-func (s *Server) pressShellKey(shell *session.ChildShell, key string, repeat int) (map[string]any, *mcpgo.CallToolResult) {
+func (s *Server) pressShellKey(ctx context.Context, shell *session.ChildShell, key string, repeat int) (map[string]any, *mcpgo.CallToolResult) {
 	if s.reviewHolds(shell) {
 		// The ending key commits whatever text this shell staged, so the queue holds
 		// one complete command line. With nothing staged the key alone is the unit:
 		// ctrl+c interrupts a running process, and a bare enter runs an empty line,
 		// either of which a reviewer must still see.
-		if _, err := shell.CommitStagedForApproval("mcp", key, repeat); err != nil {
+		if _, err := shell.CommitStagedForApproval(callerSource(ctx), key, repeat); err != nil {
 			return nil, toolError(CodeOperationFailed, "%s", err.Error())
 		}
 		return reviewFields(true), nil
 	}
 
-	if err := shell.PressKeyFrom(key, repeat, session.InputFromAI); err != nil {
+	if err := shell.PressKeyFrom(key, repeat, callerInputSource(ctx)); err != nil {
 		return nil, toolError(CodeOperationFailed, "%s", err.Error())
 	}
 	return map[string]any{"success": true}, nil
@@ -627,6 +628,10 @@ func (s *Server) resolveShellIDForRead(sess *session.Session, shellID string) (s
 	if cs := sess.GetChildShell(shellID); cs != nil {
 		return cs.ID, nil
 	}
+	// A locator is the one spelling that can be MALFORMED (an entry name with a
+	// channel index), so it keeps its own diagnostics; every other spelling is
+	// decomposed by SplitHandle. Both end at the same index lookup below.
+	var h locator.Handle
 	if looksLikeResourceLocator(shellID) {
 		p, err := parseResourceURL(shellID)
 		if err != nil {
@@ -635,28 +640,42 @@ func (s *Server) resolveShellIDForRead(sess *session.Session, shellID string) (s
 		if p.Kind == resourceURLEntry {
 			return "", toolError(CodeInvalidArgument, "%s", fmt.Sprintf("resource URL %q names an entry, not a session or shell", shellID))
 		}
-		// A locator may name a different session than the session_id argument; the
-		// shell it resolves to is what the caller asked to read.
-		if p.SessionID != sess.ID {
-			target := s.sessMgr.Get(p.SessionID)
-			if target == nil {
-				return "", toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' not found", p.SessionID))
+		h = locator.Handle{SessionID: p.SessionID, Index: p.Index}
+	} else {
+		h = locator.SplitHandle(shellID)
+		if h.SessionID == shellID && h.Index == 0 {
+			// No channel named: this may still be a bare session id, which is legal
+			// here ("read the session's primary channel"). Only a value that names
+			// neither a known session nor a channel is unknown; the lookup below
+			// decides, and the SessionID stays as given.
+			if s.sessMgr.Get(h.SessionID) == nil {
+				if cs := sess.GetChildShell(h.SessionID); cs != nil {
+					return cs.ID, nil
+				}
+				return "", toolError(CodeShellNotFound, "%s", fmt.Sprintf("Shell '%s' not found", shellID))
 			}
-			sess = target
 		}
-		idx := p.Index
-		if idx == 0 {
-			idx = 1
-		}
-		if cs, ok := sess.ShellByIndex(idx); ok {
-			return cs.ID, nil
-		}
-		if sh, ok := sess.SnapshotShellByIndex(idx); ok {
-			return sh.ID, nil
-		}
-		return "", toolError(CodeShellNotFound, "%s", session.ShellIndexOutOfRangeError(sess.ID, idx, sess.LiveShellCount()).Error())
 	}
-	return "", toolError(CodeShellNotFound, "%s", fmt.Sprintf("Shell '%s' not found", shellID))
+	// A handle may name a different session than the shell_id argument; the shell it
+	// resolves to is what the caller asked to read.
+	if h.SessionID != sess.ID {
+		target := s.sessMgr.Get(h.SessionID)
+		if target == nil {
+			return "", toolError(CodeSessionNotFound, "%s", fmt.Sprintf("Session '%s' not found", h.SessionID))
+		}
+		sess = target
+	}
+	idx := h.Index
+	if idx == 0 {
+		idx = 1
+	}
+	if cs, ok := sess.ShellByIndex(idx); ok {
+		return cs.ID, nil
+	}
+	if sh, ok := sess.SnapshotShellByIndex(idx); ok {
+		return sh.ID, nil
+	}
+	return "", toolError(CodeShellNotFound, "%s", session.ShellIndexOutOfRangeError(sess.ID, idx, sess.LiveShellCount()).Error())
 }
 
 func (s *Server) handleRegisterReader(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {

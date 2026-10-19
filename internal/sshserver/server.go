@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/charmbracelet/ssh"
+	"github.com/open-mcp-ai/termcp/internal/forward"
 	"github.com/open-mcp-ai/termcp/internal/shell"
 	"github.com/pkg/sftp"
 )
@@ -177,6 +178,27 @@ func New() *Server {
 		},
 	}
 	_ = srv.SetOption(ssh.AllocatePty())
+
+	// tcpip-forward (ssh -R): the library ships the handler but no server installs
+	// it by default, so without these two lines the request reaches a Server with
+	// no handler and is answered "denied by peer" -- which reads to a caller as the
+	// target's policy rather than as a feature that was never wired. The callback
+	// is what the handler consults before binding, so leaving it nil denies
+	// everything even with the handler present.
+	//
+	// The bind address in that request is the CLIENT's argument, so it is checked
+	// rather than trusted: loopback only. An in-memory peer is a session on this
+	// host, which has no reason to ask the server to listen for the network, and a
+	// forward is a tunnel that has already authenticated -- publishing it on
+	// 0.0.0.0 is a decision no client of this transport gets to make.
+	fwdTCP := &ssh.ForwardedTCPHandler{}
+	srv.RequestHandlers = map[string]ssh.RequestHandler{
+		"tcpip-forward":        fwdTCP.HandleSSHRequest,
+		"cancel-tcpip-forward": fwdTCP.HandleSSHRequest,
+	}
+	srv.ReversePortForwardingCallback = func(_ ssh.Context, bindHost string, _ uint32) bool {
+		return forward.IsLoopbackHost(bindHost)
+	}
 	// Wrap the allocator so the PTY it creates is closed under the same lock the
 	// session handler holds while forking the command onto it (see sessionPTY).
 	allocPty := srv.PtyHandler

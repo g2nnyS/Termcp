@@ -23,8 +23,9 @@ import (
 //
 // Terminating the tool surface is the point: the tool list stops growing because
 // growth happens in the COMMAND space (a new directive, an alias, an installed
-// MCP server) rather than in `tools/list`. See the design note in
-// docs/mcp-tools.md.
+// MCP server) rather than in `tools/list`. The command space documents itself —
+// `help`, `help <directive>`, and an empty cmd — so growth needs no second file
+// to keep in sync.
 const termToolName = "term"
 
 // window defaults. Two seconds is the sampling window for a pty and the upper
@@ -59,77 +60,58 @@ type termArgs struct {
 	OnLinesOverflow string
 	PipeTo          string
 	LearnMode       bool
+
+	// StructuredOnly sends the reply as its JSON projection only, dropping the
+	// rendered text one. The two carry the same bytes, so a reply that sends both
+	// bills its body twice; this is the switch that declines the second copy (see
+	// envelope.Reply.StructuredOnly).
+	StructuredOnly bool
 }
 
-// parseTermArgs reads the window parameters and range-checks them. A value
-// outside its domain is an argument error, not a silent substitution: a caller
-// that typed 0 where it meant 8192 should be told, not quietly given a different
-// read.
-func parseTermArgs(args map[string]any) (termArgs, *directive.Error) {
-	w := termArgs{
-		TimeoutSeconds:  getFloat64(args, "timeout", defaultTimeoutSeconds),
-		BytesLimit:      int(getFloat64(args, "bytes_limit", defaultBytesLimit)),
-		LinesLimit:      int(getFloat64(args, "lines_limit", defaultLinesLimit)),
-		TotalBytesLimit: int(getFloat64(args, "total_bytes_limit", defaultTotalBytesLimit)),
-		OnTimeOverflow:  overflowPolicy(args, "on_time_overflow"),
-		OnBytesOverflow: overflowPolicy(args, "on_bytes_overflow"),
-		OnLinesOverflow: overflowPolicy(args, "on_lines_overflow"),
-		PipeTo:          strings.TrimSpace(getString(args, "pipe_to", "")),
-		LearnMode:       getBool(args, "learn_mode", false),
-	}
-	switch {
-	case w.TimeoutSeconds < 0 || w.TimeoutSeconds > 3600:
-		return termArgs{}, &directive.Error{Msg: "timeout must be between 0 and 3600 seconds"}
-	case w.BytesLimit < 0:
-		return termArgs{}, &directive.Error{Msg: "bytes_limit must be >= 0 (0 = handle only, no bytes)"}
-	case w.LinesLimit < 0:
-		return termArgs{}, &directive.Error{Msg: "lines_limit must be >= 0 (0 = no line limit)"}
-	case w.TotalBytesLimit <= 0:
-		return termArgs{}, &directive.Error{Msg: "total_bytes_limit must be > 0: it is the absolute cap for the whole reply"}
-	case w.OnTimeOverflow == "":
-		return termArgs{}, &directive.Error{Msg: "on_time_overflow must be truncate or fold"}
-	case w.OnBytesOverflow == "":
-		return termArgs{}, &directive.Error{Msg: "on_bytes_overflow must be truncate or fold"}
-	case w.OnLinesOverflow == "":
-		return termArgs{}, &directive.Error{Msg: "on_lines_overflow must be truncate or fold"}
-	}
-	return w, nil
-}
-
-// overflowPolicy normalises an overflow behaviour. truncate is the default
-// because fold (return nothing this time) has to be asked for: a caller that runs
-// `ls` on a huge directory wants the head of it, not an empty reply.
-func overflowPolicy(args map[string]any, key string) string {
-	v := strings.TrimSpace(strings.ToLower(getString(args, key, "")))
-	switch v {
-	case "", "truncate":
-		return "truncate"
-	case "fold":
-		return "fold"
-	}
-	return "" // invalid; parseTermArgs turns this into a 400
-}
-
-// handleTerm is the single entry point.
+// handleTerm is the MCP entrance: a thin wrapper that hands the command line to
+// Term and re-renders the reply as a tool result.
 func (s *Server) handleTerm(ctx context.Context, request mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error) {
-	rawCmd := getString(request.GetArguments(), "cmd", "")
-	win, derr := parseTermArgs(request.GetArguments())
+	args := request.GetArguments()
+	return toolResult(s.Term(ctx, getString(args, "cmd", ""), args)), nil
+}
+
+// Term executes one term command line and returns the reply as plain data.
+//
+// It is the surface-independent half of the tool: the command space IS the
+// protocol, so any entrance that can produce a (cmd, window) pair gets the same
+// execution and the same envelope. MCP wraps the reply in a tool result; REST
+// serves its structured projection (see TermHandler). Neither re-implements a
+// directive, and neither re-derives admission — every directive reaches a
+// handler through callTool, which runs checkAdmission, so the capability table
+// and review mode cover this entrance without being told it exists.
+//
+// The window parameters are read from args by their tool names, so a caller
+// arriving over HTTP sends the same object the tool's schema describes.
+func (s *Server) Term(ctx context.Context, cmd string, args map[string]any) envelope.Reply {
+	win, derr := parseTermArgs(args)
 	if derr != nil {
-		return termSlotResult(envelope.Slot{
+		return envelope.Reply{Slots: []envelope.Slot{{
 			Code:    400,
 			Headers: map[string]string{"Error-Code": "invalid_argument"},
 			Body:    derr.Msg,
-		}), nil
+		}}}
 	}
+	t := s.executeTerm(ctx, cmd, win)
+	// The total cap is a property of the REPLY, not of one slot: ten slots each
+	// within their own byte limit still add up to a context nobody budgeted for.
+	return envelope.Reply{Slots: t.applyTotalCap(t.slots), StructuredOnly: win.StructuredOnly}
+}
 
-	file, err := directive.Parse(rawCmd)
+// executeTerm parses cmd and runs it, accumulating the reply.
+func (s *Server) executeTerm(ctx context.Context, cmd string, win termArgs) termReply {
+	file, err := directive.Parse(cmd)
 	if err != nil {
 		// A directive the caller invented (an alias) is unknown to the parser by
 		// definition, so it is resolved here before the error is reported.
 		if stmt, ok := aliases.expandError(err); ok {
-			return s.runStatements(ctx, []directive.Statement{stmt}, win), nil
+			return s.runStatements(ctx, []directive.Statement{stmt}, win)
 		}
-		return termSlotResult(s.parseErrorSlot(err)), nil
+		return termReply{win: win, slots: []envelope.Slot{s.parseErrorSlot(err)}}
 	}
 	// An empty cmd is the "I just woke up" call: it must be legal, cheap, and
 	// information-dense, never an error.
@@ -137,14 +119,14 @@ func (s *Server) handleTerm(ctx context.Context, request mcpgo.CallToolRequest) 
 		return s.termGuide(ctx, win)
 	}
 
-	return s.runStatements(ctx, file.Statements, win), nil
+	return s.runStatements(ctx, file.Statements, win)
 }
 
 // runStatements dispatches already-parsed statements and assembles the reply.
 //
 // An alias is expanded before dispatch and before Path is read, so the echo a
 // caller gets back is the command that actually ran.
-func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement, win termArgs) *mcpgo.CallToolResult {
+func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement, win termArgs) termReply {
 	out := termReply{win: win, seenUsage: map[string]bool{}}
 	s.currentReply = &out
 	defer func() { s.currentReply = nil }()
@@ -162,7 +144,44 @@ func (s *Server) runStatements(ctx context.Context, stmts []directive.Statement,
 		}
 		out.slots = append(out.slots, slots...)
 	}
-	return out.result()
+	if win.PipeTo != "" {
+		out.slots = s.forwardSlotsToStdin(ctx, win.PipeTo, out.slots)
+	}
+	return out
+}
+
+// forwardSlotsToStdin implements pipe_to: the reply's bytes go into another
+// handle's stdin, and stay out of the reply body.
+//
+// It is the one parameter in the schema that made a promise nothing kept — the
+// argument was parsed and then read by nobody, so a caller that asked for a pipe
+// got its bytes back inline instead. The rule is one call, one target: whatever
+// this call produced, in order, into one channel. Type-and-enter is deliberately
+// not implied (the bytes are written as they are), because a pipeline stage takes
+// raw input, not a shell line.
+//
+// The forwarded bytes leave the reply body — that is the point of asking — and a
+// target that does not resolve adds its own failing slot, because silently
+// returning the bytes anyway would tell the caller the pipe worked.
+func (s *Server) forwardSlotsToStdin(ctx context.Context, target string, slots []envelope.Slot) []envelope.Slot {
+	var body strings.Builder
+	for _, slot := range slots {
+		if slot.Code < 400 {
+			body.WriteString(slot.Body)
+		}
+	}
+	if body.Len() == 0 {
+		return slots
+	}
+	if _, fail := s.callTool(ctx, "shell_input", argsOf("shell_id", target, "text", body.String())); fail != nil {
+		return append(slots, failureSlot(fail))
+	}
+	for i := range slots {
+		if slots[i].Code < 400 {
+			slots[i].Body = ""
+		}
+	}
+	return slots
 }
 
 // parseErrorSlot renders a directive-level failure as one slot, so a bad
@@ -191,7 +210,25 @@ func (s *Server) parseErrorSlot(err error) envelope.Slot {
 		// whole listing rides along instead of a second round trip.
 		headers["Usage"] = directiveTable()
 	}
-	return envelope.Slot{Code: 400, Headers: headers, Body: derr.Msg}
+	// PARSING PRECEDES EVERYTHING. The whole cmd is parsed before the first
+	// statement runs, so this failure means the batch did not run — not even the
+	// statements that parsed. Without saying so, a 400 with no slots is
+	// indistinguishable from a batch that ran and produced nothing, and the caller
+	// is left reading the error to guess whether any side effect happened.
+	//
+	// The count is there for the caller whose cmd was long enough that "how much
+	// of it was accepted" is itself information: it is the boundary between "fix
+	// one word" and "the shape is wrong".
+	// The note only appears when an EARLIER statement parsed: that is the case
+	// where the caller has something to be wrong about ("I wrote three things and
+	// one is a typo — did the other two run?"). With a single broken statement
+	// there is nothing else that could have run, so saying so is noise on the most
+	// common error of all.
+	body := derr.Msg
+	if derr.Parsed > 0 {
+		body += fmt.Sprintf("\nnothing was executed, including the %d statement(s) before this one: a cmd is parsed in full before any of it runs", derr.Parsed)
+	}
+	return envelope.Slot{Code: 400, Headers: headers, Body: body}
 }
 
 // directiveTable renders the one-line table `help` prints, for the error reply
@@ -225,16 +262,22 @@ type termReply struct {
 	seenUsage map[string]bool
 }
 
-// result assembles the tool result: the text projection, the structured twin, and
-// the isError flag taken from the codes.
+// result assembles the tool result from a reply: the text projection, the
+// structured twin, and the isError flag taken from the codes.
 //
-// The total byte cap is applied here, across slots, because it is a property of
-// the REPLY and not of one slot: ten slots each within their own byte limit still
-// add up to a context the caller did not budget for.
-func (t termReply) result() *mcpgo.CallToolResult {
-	slots := t.applyTotalCap(t.slots)
-	reply := envelope.Reply{Slots: slots}
+// The total byte cap has already been applied by Term, because it is a property
+// of the reply rather than of one slot.
+//
+// In the structured-only mode the text content is omitted rather than sent empty:
+// a JSON client reads structuredContent and one empty string is noise, while a
+// client that renders text has already asked for something the caller declined to
+// pay for. The tool result stays valid either way — content is allowed to be
+// empty, and every field the caller needs is in structuredContent.
+func toolResult(reply envelope.Reply) *mcpgo.CallToolResult {
 	result := mcpgo.NewToolResultText(reply.Text())
+	if reply.StructuredOnly {
+		result.Content = nil
+	}
 	result.IsError = reply.IsError()
 	structured := reply.Structured()
 	if len(structured) == 1 {
@@ -282,7 +325,7 @@ func (t termReply) applyTotalCap(slots []envelope.Slot) []envelope.Slot {
 
 // termSlotResult wraps one slot as a tool result.
 func termSlotResult(slot envelope.Slot) *mcpgo.CallToolResult {
-	return termReply{win: defaultTermArgs(), slots: []envelope.Slot{slot}}.result()
+	return toolResult(envelope.Reply{Slots: []envelope.Slot{slot}})
 }
 
 // defaultTermArgs is the window used when a reply is built outside a call (an

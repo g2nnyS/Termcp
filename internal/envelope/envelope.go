@@ -236,7 +236,12 @@ func structValue(key, value string) any {
 }
 
 // Structured renders the slot as the JSON value that mirrors it: the status line
-// as three keys, then every header by its own name, then the body verbatim.
+// as three keys, then every header by its own name, then the body.
+//
+// The body is always included. A client that renders only this projection is the
+// reason the field exists, so omitting it would leave that client with no bytes
+// at all. The TEXT projection is where the redundancy gets resolved (see
+// Reply.StructuredOnly) — this one stays unconditional.
 func (s Slot) Structured() map[string]any {
 	out := make(map[string]any, len(s.Headers)+4)
 	out["protocol"] = Protocol
@@ -256,11 +261,34 @@ func (s Slot) Structured() map[string]any {
 // Reply assembles slots into the tool result's two projections.
 type Reply struct {
 	Slots []Slot
+
+	// StructuredOnly drops the rendered text projection and keeps only the JSON
+	// one. It is set by the caller (term's structured_only argument) and travels
+	// with the reply because both projections are produced in one place, and the
+	// choice belongs to the value rather than to whichever transport renders it.
+	//
+	// Why a caller wants it: the two projections carry the SAME bytes, so a reply
+	// that sends both bills its body twice. That is a rounding error on `help`
+	// (+25% measured) and most of the reply on a large read (+57% on a 200-line
+	// tail) — which is exactly where the window parameters were supposed to stop
+	// the caller paying for output it did not ask for. Off by default because the
+	// text projection is what a model reads most comfortably: the overhead buys a
+	// status line and headers in the form a reader expects. A caller moving big
+	// payloads declines it.
+	StructuredOnly bool
 }
 
 // Text renders every slot, separated by one blank line between responses (an
 // HTTP message ends at its body; the separator is what makes two responses two).
+//
+// An empty string when the reply asked for the structured projection only — see
+// Reply.StructuredOnly. The caller (the tool result) then sends no text content,
+// which is the point: a client reading only structuredContent gets the same
+// answer for half the bytes.
 func (r Reply) Text() string {
+	if r.StructuredOnly {
+		return ""
+	}
 	parts := make([]string, 0, len(r.Slots))
 	for _, s := range r.Slots {
 		parts = append(parts, s.Text())

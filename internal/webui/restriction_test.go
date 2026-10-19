@@ -170,7 +170,7 @@ func TestRESTRespectsSessionRestriction(t *testing.T) {
 	// Closing a forward and removing a notification rule name their own ids, not a
 	// session, so both routes have to look the owner up. A caller showing up with
 	// only the resource id must meet the same whitelist as one naming the session.
-	fw, err := p.forwardMgr.CreateDynamic(sid, "restricted", 0, nil, true)
+	fw, err := p.forwardMgr.CreateDynamic(sid, "restricted", "", 0, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}

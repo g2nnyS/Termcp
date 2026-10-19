@@ -1,8 +1,6 @@
 package mcp
 
 import (
-	"fmt"
-
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
@@ -10,24 +8,65 @@ import (
 // registerTermTools declares the single terminal entry, which is the whole
 // default surface. Keep it that way: the tool listing is context the caller pays
 // for on every turn, and the capability count must not move it (issue #117 33b).
+//
+// The argument list is not written here — it is rendered from termArgDecls
+// (term_args.go), the same table docs/api.md's parameter table and the tests read.
+// Adding an argument is one entry in that table, and the schema, the doc and the
+// parser's default all move together.
 func registerTermTools(mcpServer *mcpserver.MCPServer, s *Server) {
-	mcpServer.AddTool(mcpgo.NewTool(termToolName,
+	opts := []mcpgo.ToolOption{
 		// Four default booleans on every tool carry no termcp information and cost
 		// ~80 bytes; the annotation block is empty on purpose.
 		mcpgo.WithToolAnnotation(mcpgo.ToolAnnotation{}),
 		mcpgo.WithDescription(termDescription),
-		mcpgo.WithString("cmd", mcpgo.Description("One terminal line, e.g. `run a1f3:1 ls -la`. Empty = guide: usage summary plus what is available to act on now.")),
-		// The default is repeated in the prose, not only in the schema's
-		// `default` field: clients differ on whether they render that field, and
-		// a hidden default is a guess the caller should not have to make.
-		mcpgo.WithNumber("timeout", mcpgo.Description(fmt.Sprintf("Time axis: max seconds to wait. A pipe returns early when its process exits; a pty waits the window out. 0 = do not wait. Default: %d.", defaultTimeoutSeconds)), mcpgo.DefaultNumber(defaultTimeoutSeconds)),
-		mcpgo.WithNumber("bytes_limit", mcpgo.Description(fmt.Sprintf("Space axis: max raw bytes returned. 0 = handle only, consume nothing. Default: %d.", defaultBytesLimit)), mcpgo.DefaultNumber(defaultBytesLimit)),
-		mcpgo.WithNumber("lines_limit", mcpgo.Description(fmt.Sprintf("Space axis: max complete lines returned. 0 = no line limit. Default: %d.", defaultLinesLimit)), mcpgo.DefaultNumber(defaultLinesLimit)),
-		mcpgo.WithNumber("total_bytes_limit", mcpgo.Description(fmt.Sprintf("Whole reply: absolute cap across all slots. Default: %d.", defaultTotalBytesLimit)), mcpgo.DefaultNumber(defaultTotalBytesLimit)),
-		mcpgo.WithString("on_time_overflow", mcpgo.Description("Time window overflow: truncate = return what arrived, fold = return no bytes. Default: truncate."), mcpgo.DefaultString("truncate"), mcpgo.Enum("truncate", "fold")),
-		mcpgo.WithString("on_bytes_overflow", mcpgo.Description("Byte window overflow: truncate = return the head, fold = return no bytes. Default: truncate."), mcpgo.DefaultString("truncate"), mcpgo.Enum("truncate", "fold")),
-		mcpgo.WithString("on_lines_overflow", mcpgo.Description("Line window overflow: truncate = return the first N lines, fold = return no bytes. Default: truncate."), mcpgo.DefaultString("truncate"), mcpgo.Enum("truncate", "fold")),
-		mcpgo.WithString("pipe_to", mcpgo.Description("Send this command's stdout into another handle's stdin; those bytes stay out of the reply body. Default: empty (stdout stays in the reply).")),
-		mcpgo.WithBoolean("learn_mode", mcpgo.Description("Attach the matched directive's one-line usage to its slot (once per directive). Default: false."), mcpgo.DefaultBool(false)),
-	), withLogging(termToolName, s.handleTerm, s))
+	}
+	opts = append(opts, termArgToolOptions()...)
+	mcpServer.AddTool(mcpgo.NewTool(termToolName, opts...), withLogging(termToolName, s.handleTerm, s))
+}
+
+// termArgToolOptions renders every argument declaration as its schema option.
+//
+// The default is repeated in the prose as well as in the schema's `default`
+// field: clients differ on whether they render that field, and a hidden default is
+// a guess the caller should not have to make. Writing it twice is free here
+// because both copies come from the same value.
+func termArgToolOptions() []mcpgo.ToolOption {
+	out := make([]mcpgo.ToolOption, 0, len(termArgDecls))
+	for _, d := range termArgDecls {
+		switch d.Kind {
+		case argString:
+			// No DefaultString for an empty default: a client rendering
+			// `"default": ""` beside a field whose description already says
+			// "Default: empty" is repeating it, and the field is optional either
+			// way. A non-empty string default (an enum below) is published.
+			opts := []mcpgo.PropertyOption{mcpgo.Description(d.Desc)}
+			if d.DefText != "" {
+				opts = append(opts, mcpgo.DefaultString(d.DefText))
+			}
+			out = append(out, mcpgo.WithString(d.Name, opts...))
+		case argNumber:
+			out = append(out, mcpgo.WithNumber(d.Name,
+				mcpgo.Description(d.Desc),
+				mcpgo.DefaultNumber(numDefault(d.Name)),
+			))
+		case argBool:
+			out = append(out, mcpgo.WithBoolean(d.Name,
+				mcpgo.Description(d.Desc),
+				mcpgo.DefaultBool(d.Def == true),
+			))
+		case argEnum:
+			// An enum is a string with a closed value set: the schema carries both
+			// the default and the allowed values, which is what lets a client
+			// reject a typo before the call.
+			opts := []mcpgo.PropertyOption{mcpgo.Description(d.Desc)}
+			if d.DefText != "" {
+				opts = append(opts, mcpgo.DefaultString(d.DefText))
+			}
+			if len(d.Enum) > 0 {
+				opts = append(opts, mcpgo.Enum(d.Enum...))
+			}
+			out = append(out, mcpgo.WithString(d.Name, opts...))
+		}
+	}
+	return out
 }

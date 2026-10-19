@@ -2,6 +2,17 @@
 
 Base URL: `http://localhost:18765`
 
+**Read this only if you are building on the transport.** If you are an agent
+driving Termcp, you need one endpoint — `POST /api/term` (§16) — or the MCP
+`term` tool, and the command language announces itself: `{"cmd":""}` returns the
+guide, `{"cmd":"help"}` every directive, `{"cmd":"help <directive>"}` one
+directive's shape and traps. Those replies are generated from the same table the
+tool uses, so they match the build you are talking to; this file describes the
+wire, which a command-space caller never touches.
+
+The sections below are ordered for a reader building a client — sessions,
+shells, byte cursors, the WebSocket — not for one issuing commands.
+
 Termcp is a terminal-session platform. One port serves the same sessions to four
 kinds of callers:
 
@@ -9,7 +20,7 @@ kinds of callers:
 |----------|------|--------|
 | Web UI | `/` + `/api.html` | Humans (browser) |
 | MCP | `/sse` + `/message` or `/stream` | AI agents with an MCP client |
-| Agent Skill + REST | `/SKILL.md` (install once) + `/api/*` | AI agents driving Termcp with `curl` |
+| REST (one entrance) | `POST /api/term` + `/api/*` | AI agents, scripts and CLI — no MCP client needed |
 | REST + WebSocket | `/api/*` + `/api/ui/ws` | Scripts / programs |
 
 This document covers the REST surface (scripting). Real-time terminal I/O goes over
@@ -27,9 +38,9 @@ integration surface for AI agents. Pick one transport depending on client suppor
 | stdio (bridge) | local subprocess | Stdio-only clients: `termcp stdio` relays stdin/stdout to one of the two HTTP endpoints above; `termcp daemon stdio` brings the instance up first. See the README's *Option C* |
 
 MCP tool arguments, results, and error codes are described by the tool schemas from
-`tools/list` (and summarized in the repository's `docs/mcp-tools.md`). Browser users
-can open `/api.html` (Web UI **API / MCP / SKILLS**) for copy-ready MCP config, the
-HTTP API cheat sheet, and the agent-skill download.
+`tools/list`. The command language itself is self-describing (`help`, `help <directive>`, empty `cmd` for the guide), so no written directive reference is served. Browser users
+can open `/api.html` (Web UI **API / MCP**) for copy-ready MCP config and the HTTP
+API cheat sheet.
 
 ## 2. Agent-facing documents (HTTP + MCP resources)
 
@@ -39,16 +50,20 @@ can learn the API without MCP and without version drift:
 | Document | Path | When to use it |
 |----------|------|----------------|
 | HTTP API reference (this file) | `/api.md` | You drive Termcp over HTTP yourself (REST/WebSocket): endpoints, bodies, output-cursor semantics |
-| HTTP skill (curl recipes) | `/SKILL.md` | Install once into a skills directory so the curl workflow is available on demand later |
 
-`/SKILL.md` is served flat (as guessable as `/api.md`) but is a real Agent Skill:
-save it as `termcp/SKILL.md` in your agent's skills directory — the directory name
-is what a skill loader discovers. Claude Code reads `~/.claude/skills/termcp/SKILL.md`;
-agents following the shared convention read `~/.agents/skills/termcp/SKILL.md`
-(project-scoped: `<project>/.claude/skills/termcp/SKILL.md`). Restart the agent
-session afterwards; adding/removing a skill is just writing/deleting that folder.
+This is the only document the instance serves, and it covers the *transport*
+layer — endpoints, bodies, cursors, auth. The **command language** is not
+documented here on purpose: it is self-describing. An empty `cmd` returns the
+guide, `{"cmd":"help"}` returns the whole directive table, and
+`{"cmd":"help <directive>"}` returns one directive's shape and traps — all
+generated from the same table the MCP tool uses, so they cannot drift from the
+build that serves them. The same is true of the extension layer: `help ext`
+carries what a pinned, capability-trimmed session is and how to drive one.
 
-MCP clients get the same bytes as resources: `resources/list` exposes these two files
+A written tutorial would be a second description of the protocol, and the one
+thing a second description reliably does is drift.
+
+MCP clients get the same bytes as resources: `resources/list` exposes these files
 and the `resources/read` URIs are exactly the `<origin>/…` HTTP addresses above (one
 URI, two access paths). The `learn-api` prompt primes an agent with these documents
 before it acts. Like the tool listing, these addresses follow the **request**: a
@@ -79,17 +94,14 @@ name makes the published address unusable, since termcp has no self-origin overr
 The one fallback is a request that names no host at all (HTTP/1.0 without `Host`), which
 is handed the discovered bind address instead.
 
-Authentication does not apply to these two read-only documents: they carry no data
+Authentication does not apply to these read-only documents: they carry no data
 and no secrets, and a fresh client (an agent before MCP setup, a script) has to be
-able to fetch them before it can use the API, so `/api.md` and `/SKILL.md` stay
-public even when a token is configured. Everything else — Web UI, REST, MCP, WebSocket
+able to fetch them before it can use the API, so `/api.md` stays public even when a
+token is configured. Everything else — Web UI, REST, MCP, WebSocket
 — still requires credentials.
 
 ```bash
 curl -fsS "$BASE/api.md"                       # authoritative reference
-DIR=~/.claude/skills                           # Claude Code
-# DIR=~/.agents/skills                         # other agents
-mkdir -p "$DIR/termcp" && curl -fsS "$BASE/SKILL.md" -o "$DIR/termcp/SKILL.md"
 ```
 
 ## 3. Authentication (optional, off by default)
@@ -173,7 +185,7 @@ Constraints:
   kept only the hash — `termcp daemon` management, `termcp stdio` — can
   still authenticate. The hash then doubles as a secret.
 - Tokens are never logged and must not go into URLs (query strings) — use headers.
-- Public exception: the two documentation endpoints `/api.md` and `/SKILL.md`
+- Public exception: the documentation endpoint `/api.md`
   (GET/HEAD only, no data inside) are served **without** credentials, so agents
   and scripts can fetch the docs before they have a token. All other surfaces
   require the token.
@@ -1027,16 +1039,24 @@ Request:
   "direction": "local",      // "local" | "remote" | "dynamic"
   "remote_host": "localhost",
   "remote_port": 80,
-  "local_host": "0.0.0.0",   // required for remote mode
-  "local_port": 8080          // 0 = auto-assign
+  "bind_host":  "",          // local: what THIS host listens on (default 127.0.0.1)
+  "local_host": "0.0.0.0",   // remote: what the TARGET listens on
+  "local_port": 8080          // 0 = auto-assign (local/dynamic only)
 }
 ```
 
 | direction | Required fields |
 |-----------|-----------------|
-| `local` | `remote_host`, `remote_port` (1-65535) |
+| `local` | `remote_host`, `remote_port` (1-65535); `bind_host` optional |
 | `remote` | `local_host`, `local_port`, `remote_host`, `remote_port` (1-65535) |
-| `dynamic` | none |
+| `dynamic` | `local_port` optional; `bind_host` is refused unless loopback |
+
+`bind_host` and `local_host` name two different machines, which is why they are two
+fields: `local` and `dynamic` listen here, `remote` listens on the target. Setting
+`bind_host` to `0.0.0.0` (or `*`) publishes the tunnel to every interface, and the
+review prompt says so before the forward is created. A `dynamic` forward refuses any
+non-loopback `bind_host`: its SOCKS5 handshake performs no authentication, so it
+would be an open proxy for anything that can reach the port.
 
 Errors: `404` unknown session, `409` the session is closed (DEAD — a closed
 session is read-only and accepts no new forwards).
@@ -1824,3 +1844,115 @@ already in use are renamed rather than overwritten — up to the first free
 ```
 Response 201: { "imported": 2, "renamed": [ { "from": "docs", "to": "docs-2" } ] }
 ```
+
+## 16. The term entrance
+
+### `POST /api/term`
+
+One call, one command line: the REST shape of the same protocol the MCP `term`
+tool serves. The body is that tool's argument object, the reply is the same
+envelope, and the execution is the same call — a directive does not behave
+differently because HTTP carried it.
+
+Why this exists: a script, a CLI and an agent skill need a shape they can already
+send. The alternative was eight endpoints whose output cursor, stream filter and
+window semantics are all one directive's job here.
+
+```
+Request:  { "cmd": "ps", "bytes_limit": 0 }
+
+Response 200:
+{ "protocol": "TERM/1", "code": 200, "reason": "OK",
+  "Path": "ps", "body": "(nothing is running)\n" }
+```
+
+<!-- BEGIN termdoc: args -->
+| `cmd` | Empty or omitted returns the guide (where am I, what can I do, what is here) — never an error |
+| `timeout` | Seconds to wait (default 2; a pipe returns as soon as its process exits) |
+| `bytes_limit` | Max bytes per slot (default 8192; `0` = the handle only, no bytes) |
+| `lines_limit` | Max lines per slot (default 200; `0` = no line limit) |
+| `total_bytes_limit` | Absolute cap for the whole reply (default 32768) |
+| `on_time_overflow` | `truncate` (default) or `fold` (return no bytes this time) |
+| `on_bytes_overflow` | `truncate` (default) or `fold` (return no bytes this time) |
+| `on_lines_overflow` | `truncate` (default) or `fold` (return no bytes this time) |
+| `pipe_to` | A handle whose stdin receives this reply's bytes; they leave the body |
+| `learn_mode` | Attach each directive's usage line once per reply |
+| `structured_only` | Send only the JSON projection, dropping the rendered text. Both carry the same bytes, so this halves a large reply's cost (measured: −49%); a client that renders text sees none. Default `false` |
+<!-- END termdoc: args -->
+
+The window parameters are identical to the tool's, with the same names and the
+same defaults — they bound what comes back, never what the command does.
+
+`structured_only` is not a window: the windows bound how much of a body comes
+back, this declines a duplicate of the body that did come back. It exists because
+the two projections (rendered text and JSON) carry the same bytes, which is a
+rounding error on a listing and most of the reply on a large read — exactly where
+the windows were meant to protect the caller from paying for output it did not ask
+for. A caller moving a big payload turns it on; one reading `ps` need not.
+
+**Statements.** `;` separates statements and each gets its own slot: `help; ps`
+answers twice. `&&` and `|` stay inside one statement (that is one command).
+
+**Status codes and slots.** The status code answers for the REQUEST. A command
+that failed is a 2xx with a failing slot, so a batch keeps the slots that
+succeeded:
+
+```
+$ curl -sS -X POST localhost:18765/api/term -d '{"cmd":"ps; help"}'
+{ "slots": [ { "code": 200, … }, { "code": 200, … } ] }
+```
+
+A reply where every slot failed reports the first slot's code instead, so `curl
+-f` still distinguishes a typo from a working call. A single-slot reply is a bare
+object; several arrive wrapped in `{"slots": [...]}` — the same two shapes the
+tool's `structuredContent` uses.
+
+The rendered form (what the MCP text projection shows the model) rides along as
+`X-Termcp-Text`, newlines escaped. It is a convenience for a human reading a
+`curl` call; the JSON body is the contract.
+
+**Admission.** This entrance asks the same capability table as the tool surface:
+a session whose template does not grant an operation is refused with `403` and
+the same text, and review mode holds the same operations. The one thing the
+entrance changes is what the record says — the review queue `source` and the
+transcript's input status report `rest` instead of `mcp`, so a reviewer reads who
+actually asked.
+
+```bash
+curl -sS -X POST localhost:18765/api/term \
+  -H 'X-Termcp-Namespace: my-agent' \
+  -d '{"cmd":"ps; read a1f3:1 --tail 20"}'
+```
+
+`X-Termcp-Namespace` is read here exactly as the MCP transports read it. Without
+it a caller is the operator.
+
+### Caller namespace
+
+Several agents on one instance share one session registry by default, so two of
+them easily reach each other's terminals. The header namespaces a caller:
+
+```
+X-Termcp-Namespace: alice
+```
+
+| Behaviour | Not declared | Declared `alice` |
+|-----------|--------------|------------------|
+| `ps` | every non-infrastructure session | only sessions `alice` opened |
+| `pipe` / `pty` (new session) | an ordinary session | the session is tagged `ns:alice`, persisted in its manifest |
+| Operating by handle | any session (including an extension's, when the handle is in hand) | only `ns:alice`, otherwise `forbidden` |
+| Extension / infrastructure sessions | reachable with a handle | refused |
+
+A caller that declares nothing is the **owner** — the browser, the stdio bridge,
+an agent that set no header — not a tenant: it keeps the ordinary behaviour. The
+feature exists to stop two agents colliding, not to hide an agent from the owner.
+
+Names are letters/digits/`-_.`, at most 64 characters. An invalid value is
+**refused** rather than silently treated as "no namespace": degrading to the
+shared view is the opposite of what the caller asked for, so a bad claim
+isolates instead. The `ns:` prefix is internal — send the bare name.
+
+**Errors.** A malformed body is a `400` carrying the same envelope, so a caller
+reads one format whether it mistyped JSON or a directive. An unknown directive
+answers `400` with `Error-Code: unknown_directive` and the whole directive table
+in `Usage` — the same reply the tool gives, because it is the same parser.

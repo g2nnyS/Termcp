@@ -6,11 +6,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+
+	"github.com/open-mcp-ai/termcp/internal/directive"
+	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 )
 
 // termCall drives the single entry the way a model would, with the same JSON
@@ -92,12 +97,18 @@ func TestTermHelp(t *testing.T) {
 			t.Errorf("help misses directive %q:\n%s", op, text)
 		}
 	}
+	// The one-line template comes FIRST in the body and is not replaced by the page:
+	// a caller scanning for shape must still find it before it has to read prose.
+	// The page itself is allowed to be long -- most directives have one, and `run`
+	// joined them when it gained the pty-completion explanation. Asserting a fixed
+	// line count here only pinned that `run` happened to be the one without a page.
 	single := termText(t, s, map[string]any{"cmd": "help run"})
-	if !strings.Contains(single, "run <handle> <payload>") {
-		t.Errorf("help run = %q", single)
+	body := single
+	if _, rest, ok := strings.Cut(single, "\n\n"); ok {
+		body = rest // skip the envelope: status line and headers
 	}
-	if n := strings.Count(strings.TrimSpace(single), "\n"); n > 3 {
-		t.Errorf("help for one directive should be one line plus the envelope, got:\n%s", single)
+	if first, _, _ := strings.Cut(body, "\n"); !strings.HasPrefix(first, "run <handle> <payload>") {
+		t.Errorf("the body does not open with the usage template:\n%s", single)
 	}
 }
 
@@ -470,6 +481,45 @@ func TestTermBytesLimitZeroConsumesNothing(t *testing.T) {
 	}
 }
 
+// TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt is the regression test for a recv
+// that could never return a frame.
+//
+// mcpRecvFrame passed the channel's current byte LENGTH as shell_output's offset.
+// That parameter is an absolute position, so it asked for the bytes just past the
+// end: recv answered "no complete frame yet" forever while the frame sat in the
+// channel, and `read` on the same handle showed it plainly. Two things are
+// asserted here because the old shape also made a second recv plausible as a fix:
+// the frame arrives, and a second recv does not deliver it again.
+func TestMCPRecvDeliversTheFrameAndDoesNotRepeatIt(t *testing.T) {
+	s := newTestServer(t)
+	// cat echoes the frame back on the channel's own stdout, which is where recv
+	// reads. A one-shot producer would exit before the second read.
+	h := openPipe(t, s, "cat")
+
+	frame := `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	if out := termText(t, s, map[string]any{"cmd": "mcp send " + h + " " + frame}); !strings.Contains(out, "202") {
+		t.Fatalf("mcp send did not accept the frame:\n%s", out)
+	}
+
+	// The peer is a process; poll a few times rather than assuming it has written.
+	var got string
+	for i := 0; i < 20; i++ {
+		got = termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+		if strings.Contains(got, `"method":"tools/list"`) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(got, `"method":"tools/list"`) {
+		t.Fatalf("mcp recv never delivered a frame that was on the channel:\n%s", got)
+	}
+
+	twice := termText(t, s, map[string]any{"cmd": "mcp recv " + h, "timeout": float64(0)})
+	if strings.Contains(twice, `"method":"tools/list"`) {
+		t.Errorf("a second recv re-delivered the same frame; the cursor did not advance:\n%s", twice)
+	}
+}
+
 // A batch target produces one slot per entry: N questions, N answers.
 func TestTermBatchProducesOneSlotPerTarget(t *testing.T) {
 	s := newTestServer(t)
@@ -757,15 +807,28 @@ func TestTermMCPStreamableHandshakeAndClose(t *testing.T) {
 	}
 }
 
+// A URL this layer cannot speak is refused with the schemes it CAN speak, not
+// with a dial failure three layers down.
+//
+// The second half used to assert the opposite — that `mcp open .../sse` was
+// refused as the legacy transport. That refusal is gone: the frame channel reads
+// whichever shape the endpoint answers with (a JSON body or one event on a
+// stream), so an endpoint carrying an /sse path is a URL like any other. What
+// was actually unsupported was the SHAPE, and the shape is now handled.
 func TestTermMcpOpenValidatesURL(t *testing.T) {
 	s := newTestServer(t)
 	res := termCall(t, s, map[string]any{"cmd": "mcp open not-a-url"})
-	if !res.IsError || !strings.Contains(toolResultText(res), "http(s) URL") {
-		t.Fatalf("mcp open accepted a non-URL:\n%s", toolResultText(res))
+	body := toolResultText(res)
+	if !res.IsError || !strings.Contains(body, "http(s)") || !strings.Contains(body, "ws(s)") {
+		t.Fatalf("mcp open refused a non-URL without naming what works:\n%s", body)
 	}
-	res = termCall(t, s, map[string]any{"cmd": "mcp open http://127.0.0.1:18765/sse"})
-	if !res.IsError || !strings.Contains(toolResultText(res), "streamable HTTP") {
-		t.Fatalf("mcp open accepted the unsupported SSE transport:\n%s", toolResultText(res))
+
+	// A URL with a scheme but no listener is a connection failure, which is a
+	// different reply from a refusal: the caller has to be able to tell a typo
+	// from a dead endpoint.
+	res = termCall(t, s, map[string]any{"cmd": "mcp open ftp://example.com"})
+	if !res.IsError || !strings.Contains(toolResultText(res), "unsupported scheme") {
+		t.Fatalf("an unknown scheme was not explained:\n%s", toolResultText(res))
 	}
 }
 
@@ -965,5 +1028,382 @@ func TestTermRefusalIsNeverSuccessShaped(t *testing.T) {
 	// The failure must name the reason a caller can act on, not a generic one.
 	if code, _ := headerValue(t, out, "Error-Code"); code != "forbidden" {
 		t.Errorf("Error-Code = %q, want forbidden:\n%s", code, out)
+	}
+}
+
+// TestProfileListRendersTheHandlersKey pins the listing against the handler's
+// own field name.
+//
+// `profile list` rendered from "configs" while handleListSSHConfigs answers
+// "ssh_configs", and listFromDoc treats a missing key as an empty list — so the
+// one call that says what you can connect to always answered "(none)" on an
+// instance holding four profiles. The fix is the key AND the shape: this listing
+// is a plain array of names, not objects with a description field.
+func TestProfileListRendersTheHandlerKey(t *testing.T) {
+	s := newTestServer(t)
+	dir := t.TempDir()
+	store := sshconfig.NewStore(dir)
+	seed := "kind = \"remote\"\nhost = \"10.0.0.1\"\nuser = \"u\"\npassword = \"placeholder\"\n"
+	if err := store.Save("demo-one", []byte(seed)); err != nil {
+		t.Fatalf("seeding the profile: %v", err)
+	}
+	s.sshConfigs = store
+
+	out := termText(t, s, map[string]any{"cmd": "profile list"})
+	if !strings.Contains(out, "demo-one") {
+		t.Fatalf("profile list dropped the profile it was given:\n%s", out)
+	}
+	if strings.Contains(out, "(none)") {
+		t.Fatalf("profile list answered the empty state while a profile exists:\n%s", out)
+	}
+}
+
+// TestFileSubActionsAreReachable pins that the three multi-action file verbs can
+// be asked at all.
+//
+// perm/link/fs dispatch on their own sub-action, which the directive reads from
+// --op. --op was never in the flag whitelist, so the parser rejected the only
+// spelling that worked ("unknown flag for file: --op") and the sub-action
+// defaulted to empty ("action must be chmod, chown, or chtimes") — three
+// capabilities unreachable from the tool surface with no way to discover it.
+func TestFileSubActionsAreReachable(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "sleep 30")
+	defer closeShell(t, s, h)
+
+	for _, tc := range []struct{ action, sub, want string }{
+		{"perm", "chmod", "chmod"},
+		{"link", "readlink", "readlink"},
+		{"fs", "realpath", "realpath"},
+	} {
+		out := termText(t, s, map[string]any{"cmd": "file " + h + " --action " + tc.action + " --op " + tc.sub + " --remote-path /tmp"})
+		if strings.Contains(out, "unknown flag") {
+			t.Errorf("file --action %s --op %s: the flag is still not accepted:\n%s", tc.action, tc.sub, out)
+		}
+		// Reaching the handler is what matters here; whether the SFTP call succeeds
+		// against a stub server is not this directive's contract.
+		if strings.Contains(out, "action must be") {
+			t.Errorf("file --action %s --op %s did not pass the sub-action through:\n%s", tc.action, tc.sub, out)
+		}
+	}
+}
+
+// TestReadBytesLimitZeroConsumesNothing pins that the directive whose job is
+// reading can still be told not to.
+//
+// readSlotAfter honoured bytes_limit=0; read had its own path that skipped the
+// check, so max_bytes=0 reached the handler and meant "no limit" — the opposite
+// of the documented "hand back the handle, consume nothing".
+func TestReadBytesLimitZeroConsumesNothing(t *testing.T) {
+	s := newTestServer(t)
+	h := openPipe(t, s, "seq 1 5")
+	waitForOutput(t, s, h, "5")
+
+	out := termText(t, s, map[string]any{"cmd": "read " + h, "bytes_limit": float64(0), "timeout": float64(0)})
+	if !strings.HasPrefix(out, "TERM/1 204") {
+		t.Fatalf("bytes_limit 0 must return no bytes:\n%s", out)
+	}
+	after := termText(t, s, map[string]any{"cmd": "read " + h, "timeout": float64(1)})
+	if !strings.Contains(after, "1\n2\n3") {
+		t.Errorf("a bytes_limit 0 read consumed the stream:\n%s", after)
+	}
+}
+
+// TestPipeToForwardsAndConsumes pins the one schema parameter that had no
+// implementation: pipe_to was parsed into termArgs and then read by nobody, so
+// asking for a pipe silently returned the bytes inline.
+func TestPipeToForwardsAndConsumes(t *testing.T) {
+	s := newTestServer(t)
+	src := openPipe(t, s, "echo forwarded-payload")
+	sink := openPipe(t, s, "cat")
+	defer closeShell(t, s, sink)
+
+	out := termText(t, s, map[string]any{"cmd": "read " + src, "pipe_to": sink, "timeout": float64(1)})
+	if strings.Contains(out, "forwarded-payload") {
+		t.Errorf("pipe_to left the forwarded bytes in the reply body:\n%s", out)
+	}
+	got := termText(t, s, map[string]any{"cmd": "read " + sink, "timeout": float64(1)})
+	if !strings.Contains(got, "forwarded-payload") {
+		t.Errorf("pipe_to wrote nothing into the target handle:\n%s", got)
+	}
+}
+
+// TestPipeToBadTargetIsAnError pins that a pipe which goes nowhere is reported.
+func TestPipeToBadTargetIsAnError(t *testing.T) {
+	s := newTestServer(t)
+	src := openPipe(t, s, "echo payload")
+	out := termText(t, s, map[string]any{"cmd": "read " + src, "pipe_to": "no-such-handle", "timeout": float64(1)})
+	if !strings.Contains(out, "not found") {
+		t.Fatalf("pipe_to to a missing handle reported nothing:\n%s", out)
+	}
+}
+
+// TestMCPCallTakesTheFrameFirst pins the argument position of the frame.
+//
+// mcpHTTP joined rest[1:], but mcpChannel had already sliced the handle off, so
+// the frame's first word was dropped: `mcp call <h> {"jsonrpc":…}` answered
+// "needs a JSON-RPC frame" and only worked with a junk word in front of it.
+func TestMCPCallTakesTheFrameFirst(t *testing.T) {
+	s := newTestServer(t)
+	ts := httptest.NewServer(s.StreamableHTTPHandler())
+	defer ts.Close()
+
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+
+	out := termText(t, s, map[string]any{"cmd": `mcp call ` + h + ` {"jsonrpc":"2.0","id":7,"method":"tools/list"}`})
+	if !strings.Contains(out, `"name":"term"`) && !strings.Contains(out, `"name": "term"`) {
+		t.Fatalf("mcp call did not send the frame it was given:\n%s", out)
+	}
+}
+
+// TestMCPCallAcceptsEveryQuotingOfTheFrame is the regression test for a frame
+// whose quotes reached the JSON parser.
+//
+// The directive splits its payload with strings.Fields, which neither keeps the
+// frame whole nor strips the caller's quoting. A JSON body contains spaces of its
+// own (`"name": "term"`), so the bare spelling that happened to work for a
+// spaceless frame fell apart for a real one, and both quoted spellings failed
+// outright with "the frame is not JSON: invalid character '\”" — an error that
+// names the JSON parser for what is a word-splitting bug one layer up.
+//
+// A frame with spaces is used deliberately: it is the only shape that tells the
+// three spellings apart.
+func TestMCPCallAcceptsEveryQuotingOfTheFrame(t *testing.T) {
+	s := newTestServer(t)
+	ts := httptest.NewServer(s.StreamableHTTPHandler())
+	defer ts.Close()
+
+	h := handleFrom(t, termText(t, s, map[string]any{"cmd": "mcp open " + ts.URL}))
+	defer termText(t, s, map[string]any{"cmd": "mcp close " + h})
+
+	// Spaces in the params object are the point, not decoration.
+	frame := `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"term","arguments":{"cmd":"ps"}}}`
+	for name, cmd := range map[string]string{
+		"bare":   "mcp call " + h + " " + frame,
+		"single": "mcp call " + h + " '" + frame + "'",
+		"double": "mcp call " + h + ` "` + frame + `"`,
+	} {
+		out := termText(t, s, map[string]any{"cmd": cmd})
+		// Assert on the REPLY, not on the echo. The rendered slot repeats the
+		// request line under "Path:", so a Contains("jsonrpc") check passes even
+		// when the frame was refused — it matches the caller's own text. The
+		// reply is the only place the peer's answer appears, so the result id is
+		// what tells a parsed frame from a rejected one.
+		if !strings.Contains(out, `"result"`) {
+			t.Errorf("%s-quoted frame was refused:\n%s", name, out)
+		}
+	}
+}
+
+// TestFilePermChmodActuallyChangesTheMode is the regression test for a silently
+// destructive bug.
+//
+// `file --action perm --op chmod --mode 420` reported success and left the file at
+// mode 0000. The directive layer sent --mode as a STRING (it IS a string for
+// read/write: text|hex|file), while the chmod handler reads it with getFloat64,
+// which returns its DEFAULT for a non-number. The mode therefore became 0, the
+// call succeeded, and the file was left unreadable — even by its own owner, which
+// makes it look like a permissions problem on the target rather than a lost
+// argument here.
+//
+// The existing chmod tests call the tool handler directly with float64(493), so
+// the conversion in the directive layer was never exercised. This test enters where
+// a caller does, and checks the mode that actually landed on the file rather than
+// the fact that the call returned 200.
+func TestFilePermChmodActuallyChangesTheMode(t *testing.T) {
+	s := newTestServer(t)
+	res, err := s.handleStartSession(context.Background(), makeRequest(map[string]any{
+		"command":    testShell(),
+		"args":       testInteractiveShellArgs(),
+		"mode":       "pty",
+		"ssh_config": "internal",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := parseResult(t, res)["session_id"].(string)
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "mode-probe.txt")
+	if err := os.WriteFile(file, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// 420 decimal == 0644. The old bug set 0 and still answered 200.
+	out := termText(t, s, map[string]any{
+		"cmd": "file " + sid + " --action perm --op chmod --remote-path " + file + " --mode 420",
+	})
+	if !strings.Contains(out, "success") && !strings.Contains(out, "200") {
+		t.Fatalf("chmod did not report success: %s", out)
+	}
+
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What the mode READS BACK as is platform-specific: Windows maps permissions
+	// onto the read-only bit, so 0644 comes back as 0666 and 0755 as 0666 too
+	// (measured). The bug this test exists for sent 0, which Windows reports as
+	// 0444 — a DIFFERENT value — so the two are distinguishable everywhere and
+	// the test does not need to skip. Asserting "not the zero-mode result" is what
+	// actually catches it; asserting the exact bits would only catch it on unix.
+	got := info.Mode().Perm()
+	if got == 0444 {
+		t.Fatalf("file mode = %#o: the mode reached chmod as 0, so the whole permission set was stripped (a string where a number was needed is silently read as the default)", got)
+	}
+	if runtime.GOOS != "windows" && got != 0644 {
+		t.Fatalf("file mode = %#o, want 0644", got)
+	}
+}
+
+// TestGuideListsCoreAndPointsAtTheRest pins the shape of the recovery call.
+//
+// The empty call is read by a caller that has not decided what to do yet, so it
+// carries the directives needed to start — and a pointer to the rest. Both halves
+// are load-bearing:
+//
+//   - Listing all 23 here cost ~1.2 KB of capability the caller has no use for at
+//     that moment, on every wake-up (measured: 2187 → 953 bytes, −56%).
+//   - Listing ONLY the core ones would make file/forward/extension work invisible
+//     to anyone who never suspects there is more to see. That is the failure the
+//     old "7 of 23 examples" had, and this test refuses to reintroduce it.
+func TestGuideListsCoreAndPointsAtTheRest(t *testing.T) {
+	s := newTestServer(t)
+	body := termGuideBody(t, s)
+
+	// Every core directive is listed with its usage line.
+	var core int
+	for _, op := range directive.Ops() {
+		if !op.Core {
+			continue
+		}
+		core++
+		if !strings.Contains(body, op.Usage) {
+			t.Errorf("the guide omits the core directive %q", op.Name)
+		}
+	}
+	if core == 0 {
+		t.Fatal("no directive is marked Core: the guide would be empty")
+	}
+
+	// The pointer must be there, must name `help`, and must say how many there
+	// are — a caller that reads "core" with no count cannot tell whether it is
+	// looking at a subset or at everything.
+	if !strings.Contains(body, "help") {
+		t.Error("the guide does not mention `help`, so the rest is undiscoverable")
+	}
+	if !strings.Contains(body, strconv.Itoa(len(directive.Ops()))) {
+		t.Errorf("the guide does not say how many directives exist (%d)", len(directive.Ops()))
+	}
+
+	// And the non-core ones are NOT dumped here: the point of the split.
+	for _, op := range directive.Ops() {
+		if op.Core {
+			continue
+		}
+		if strings.Contains(body, "  "+op.Usage+"\n") {
+			t.Errorf("the guide lists the non-core directive %q; `help` is where it belongs", op.Name)
+		}
+	}
+}
+
+// TestHelpListsEveryDirective is the other half of the contract: whatever the
+// guide filters out, `help` must still list. A core-only guide with a lossy help
+// would hide capabilities rather than defer them.
+func TestHelpListsEveryDirective(t *testing.T) {
+	s := newTestServer(t)
+	body := termText(t, s, map[string]any{"cmd": "help"})
+
+	for _, op := range directive.Ops() {
+		if !strings.Contains(body, op.Usage) {
+			t.Errorf("`help` omits %q", op.Name)
+		}
+	}
+}
+
+// termGuideBody runs the empty call and returns its body.
+func termGuideBody(t *testing.T, s *Server) string {
+	t.Helper()
+	reply := s.Term(t.Context(), "", map[string]any{})
+	if len(reply.Slots) != 1 {
+		t.Fatalf("the guide returned %d slots, want 1", len(reply.Slots))
+	}
+	return reply.Slots[0].Body
+}
+
+// TestAParseFailureSaysNothingRan pins the one thing a caller cannot see.
+//
+// A cmd is parsed in full before the first statement runs. So one typo in a
+// batch means the statements before it did not run either — correct, because a
+// batch that half-ran reports a partial success nobody can read. But the reply
+// was a bare 400 with no slots, which is indistinguishable from a batch that ran
+// and produced nothing. This is the sentence that separates the two, and it only
+// appears when there WAS an earlier statement to be wrong about: on a single
+// broken statement there is nothing else that could have run.
+func TestAParseFailureSaysNothingRan(t *testing.T) {
+	s := newTestServer(t)
+
+	// A batch where the first statement parses: the note must name it.
+	reply := s.Term(t.Context(), "ps; definitely-not-a-directive x", map[string]any{})
+	if len(reply.Slots) != 1 {
+		t.Fatalf("got %d slots, want 1", len(reply.Slots))
+	}
+	slot := reply.Slots[0]
+	if slot.Code != 400 {
+		t.Fatalf("code = %d, want 400", slot.Code)
+	}
+	if !strings.Contains(slot.Body, "nothing was executed") {
+		t.Errorf("the batch failure does not say nothing ran: %q", slot.Body)
+	}
+	if !strings.Contains(slot.Body, "1 statement") {
+		t.Errorf("the note does not say how many parsed first: %q", slot.Body)
+	}
+
+	// A single broken statement: the note would be noise, and the body must stay
+	// the error alone. This is the common case and it must not grow.
+	reply = s.Term(t.Context(), "definitely-not-a-directive x", map[string]any{})
+	if got := reply.Slots[0].Body; strings.Contains(got, "nothing was executed") {
+		t.Errorf("a single broken statement got the batch note: %q", got)
+	}
+}
+
+// TestABatchIsNotPartlyExecuted is the property the note describes. It uses a
+// statement with an observable side effect (opening a session) so that a future
+// "run what parsed" change cannot pass by only editing the message.
+func TestABatchIsNotPartlyExecuted(t *testing.T) {
+	s := newTestServer(t)
+	const name = "must-not-exist-after-a-parse-failure"
+
+	reply := s.Term(t.Context(), "pty internal --name "+name+"; definitely-not-a-directive", map[string]any{})
+	if reply.Slots[0].Code != 400 {
+		t.Fatalf("the batch was not refused: %+v", reply.Slots[0])
+	}
+
+	ps := s.Term(t.Context(), "ps --all", map[string]any{})
+	if strings.Contains(ps.Slots[0].Body, name) {
+		t.Error("the statement before the parse failure ran: parsing must precede every statement")
+	}
+}
+
+// TestRunDetailStatesWhatAPtyCannotKnow pins the thing the reply cannot say.
+//
+// On a pty, `run` samples a window and returns; there is no completion signal to
+// report, so an empty reply is indistinguishable from a silent command. That is
+// invisible in the wire format, which makes `help run` the only place a caller
+// can find it — and a caller that guesses wrong reaches for `read`, which is a
+// consuming cursor and therefore the one thing that cannot help.
+func TestRunDetailStatesWhatAPtyCannotKnow(t *testing.T) {
+	s := newTestServer(t)
+	body := termText(t, s, map[string]any{"cmd": "help run"})
+
+	for _, want := range []string{"pty", "SAMPLES", "timeout", "pipe"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("`help run` does not mention %q:\n%s", want, body)
+		}
+	}
+	// The advice that actually rescues the caller: read cannot recover the bytes.
+	if !strings.Contains(body, "consuming cursor") {
+		t.Errorf("`help run` does not warn that read is a consuming cursor:\n%s", body)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 
 	"github.com/open-mcp-ai/termcp/internal/approval"
+	"github.com/open-mcp-ai/termcp/internal/session"
 )
 
 // Review mode over the MCP surface.
@@ -18,6 +19,13 @@ import (
 // terminal, which left the two operations that can be just as irreversible —
 // overwriting a file, exposing a port — running without a decision. A gate with
 // a hole in it is worse than no gate, because it reads as protection.
+//
+// It covers the HTTP entrance to the same command space for the same reason:
+// POST /api/term resolves to the same directives and reaches these handlers, so
+// a caller that arrived over HTTP is gated by this code without being told it
+// exists. The only thing the entrance changes is what the record SAYS — the
+// queue's Source and the transcript's status — which is why both are read from
+// the context (callerSource) rather than passed in.
 //
 // What is deliberately NOT gated is the human's own surface: the WebSocket
 // terminal and the Web UI's file browser (which is the REST file API). The rule
@@ -46,6 +54,44 @@ func approvedContext(ctx context.Context) bool {
 // withApproved marks a context as an approved replay.
 func withApproved(ctx context.Context) context.Context {
 	return context.WithValue(ctx, approvedOpKey{}, true)
+}
+
+// callerSourceKey carries which entrance submitted an operation, for the two
+// places that record it: the review queue's Source field and the transcript.
+type callerSourceKey struct{}
+
+// callerSource is the entrance this call arrived through: "mcp" for the tool
+// surface, "rest" for POST /api/term. It is a context value rather than a
+// parameter because the operation is submitted four calls deep inside a
+// handler that must not know which transport carried it.
+//
+// The default is "mcp" because every existing caller is one: only the HTTP
+// entrance sets anything, so a path that forgets to inherit this keeps the
+// behaviour it has always had instead of silently claiming to be REST.
+func callerSource(ctx context.Context) string {
+	if v, ok := ctx.Value(callerSourceKey{}).(string); ok && v != "" {
+		return v
+	}
+	return "mcp"
+}
+
+// withCallerSource marks a context with the entrance that opened it.
+func withCallerSource(ctx context.Context, src string) context.Context {
+	return context.WithValue(ctx, callerSourceKey{}, src)
+}
+
+// callerInputSource is the transcript status those bytes get: an agent's
+// keystrokes are AI input, a caller's own HTTP write is API input.
+//
+// The mapping matches the one the approval executor already applies when it
+// replays a decision (internal/webui/approval.go), so a command line carries the
+// same attribution whether it ran immediately or waited for a human — and the
+// transcript never says a human typed something an agent sent.
+func callerInputSource(ctx context.Context) session.InputSource {
+	if callerSource(ctx) == "rest" {
+		return session.InputFromAPI
+	}
+	return session.InputFromAI
 }
 
 // gatedPayload is what a held operation stores so it can be replayed.
@@ -94,7 +140,7 @@ func (s *Server) gateOperation(ctx context.Context, request mcpgo.CallToolReques
 	}
 	if _, err := sess.SubmitOperation(approval.Submission{
 		Kind:    kindFor(tool, args),
-		Source:  "mcp",
+		Source:  callerSource(ctx),
 		Summary: summary,
 		Payload: payload,
 	}); err != nil {

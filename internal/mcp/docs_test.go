@@ -117,9 +117,10 @@ func TestResourcesListAndRead(t *testing.T) {
 	if err := json.Unmarshal(callMCP(t, s, "resources/list", nil), &list); err != nil {
 		t.Fatal(err)
 	}
+	// api.md is the only served document now: the extension guide moved into
+	// `help ext`, where it cannot drift from the flags it describes.
 	want := map[string]bool{
-		"http://127.0.0.1:18765/api.md":    false,
-		"http://127.0.0.1:18765/SKILL.md": false,
+		"http://127.0.0.1:18765/api.md": false,
 	}
 	for _, r := range list.Resources {
 		if _, ok := want[r.URI]; ok {
@@ -198,7 +199,11 @@ func TestLearnAPIPrompt(t *testing.T) {
 		t.Fatalf("prompts/get returned no messages: %s", get)
 	}
 	text := got.Messages[0].Content.Text
-	for _, want := range []string{"http://127.0.0.1:18765/api.md", "http://127.0.0.1:18765/SKILL.md", "restart nginx on prod"} {
+	// The prompt used to hand the agent a written curl skill. It now points at the
+	// instance's own command space instead, so what it must contain is the entrance
+	// and the self-describing calls — a written tutorial is exactly the thing that
+	// goes stale.
+	for _, want := range []string{"http://127.0.0.1:18765/api.md", "/api/term", `{"cmd":"help"}`, "restart nginx on prod"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("learn-api prompt misses %q:\n%s", want, text)
 		}
@@ -901,7 +906,7 @@ func TestResourcesFollowRequestOrigin(t *testing.T) {
 		t.Fatalf("prompts/get returned nothing: %s", get)
 	}
 	text := got.Messages[0].Content.Text
-	for _, want := range []string{origin + "/api.md", origin + "/SKILL.md"} {
+	for _, want := range []string{origin + "/api.md", "/api/term"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("learn-api prompt misses %s:\n%s", want, text)
 		}

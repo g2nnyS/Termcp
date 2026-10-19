@@ -100,5 +100,11 @@ dist: clean build
 # 同步对外服务的文档副本：assets/api.md 通过 HTTP（/api.md）与 MCP resource 对外
 # 发布，TestSyncedDocsMatchSource 会拦住漂移；MCP 工具参数由 tools/list schema
 # 自描述，因此不再同步 docs/mcp-tools.md。
+# 生成 docs/api.md 里由代码派生的块（term 的参数表）。参数是唯一还手抄
+# 描述的地方，而它已经漂移过一次：structured_only 进了 schema 却没进文档。
+# TestTermDocsAreGenerated 会在忘记跑这个目标时失败。
+termdoc:
+	go run ./cmd/termdoc
+
 sync-assets:
 	cp docs/api.md internal/webui/assets/api.md

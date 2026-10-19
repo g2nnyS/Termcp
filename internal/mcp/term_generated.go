@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
@@ -296,6 +298,7 @@ func (s *Server) directiveForward(ctx context.Context, stmt directive.Statement,
 	if stmt.Target != "" {
 		args["session_id"] = stmt.Target
 	}
+	setFlagString(args, stmt, "bind-host", "bind_host")
 	setFlagString(args, stmt, "remote-host", "remote_host")
 	setFlagNumber(args, stmt, "remote-port", "remote_port")
 	setFlagNumber(args, stmt, "local-port", "local_port")
@@ -350,7 +353,18 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	setFlagString(args, stmt, "to-path", "to_path")
 	setFlagString(args, stmt, "local-path", "local_path")
 	setFlagString(args, stmt, "data", "data")
-	setFlagString(args, stmt, "mode", "mode")
+	// --mode is a STRING for read/write (text|hex|file) and a NUMBER for
+	// `perm --op chmod` (decimal permission bits). Sending it as a string in both
+	// cases is not a type error the handler can catch: chmod reads it with
+	// getFloat64, which returns its default for anything that is not a number, so
+	// the mode silently became 0 (---------- ) while the call reported success.
+	// A file the caller then could not read looked like a permissions problem on
+	// the target, not a lost argument here.
+	if action == "perm" {
+		setFlagNumber(args, stmt, "mode", "mode")
+	} else {
+		setFlagString(args, stmt, "mode", "mode")
+	}
 	setFlagString(args, stmt, "target", "target")
 	setFlagString(args, stmt, "link-path", "link_path")
 	setFlagString(args, stmt, "existing-path", "existing_path")
@@ -364,13 +378,24 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 	setFlagNumber(args, stmt, "mtime", "mtime")
 	setFlagNumber(args, stmt, "size", "size")
 	if action != "read" && action != "write" && action != "getwd" {
-		// The actions that dispatch on their own action field take it verbatim.
+		// perm/link/fs each dispatch on their OWN action field (chmod, symlink,
+		// realpath …), so the sub-action overwrites the verb that selected the
+		// tool. --op is the spelling; --action-verb is the older alias.
+		//
+		// A missing flag yields "", not nil — the previous `== nil` test therefore
+		// never fired and the sub-action was silently empty, which is what made
+		// these three reachable only as "action must be chmod, chown, or chtimes".
 		switch action {
 		case "perm", "link", "fs":
-			args["action"] = stmt.Flags["action-verb"]
-			if args["action"] == nil {
-				args["action"] = stmt.Flags["op"]
+			sub := stmt.Flags["op"]
+			if sub == "" {
+				sub = stmt.Flags["action-verb"]
 			}
+			if sub == "" {
+				return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+					Body: "file --action " + action + " needs the sub-action: --op " + fileSubActions(action)}
+			}
+			args["action"] = sub
 		}
 	}
 
@@ -387,6 +412,20 @@ func (s *Server) directiveFile(ctx context.Context, stmt directive.Statement, wi
 		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: text}
 	}
 	return generatedSlot(stmt, win, compactDocument(doc))
+}
+
+// fileSubActions names the sub-actions of a multi-action file verb, for the
+// error that has to teach the shape without a second call.
+func fileSubActions(action string) string {
+	switch action {
+	case "perm":
+		return "chmod|chown|chtimes"
+	case "link":
+		return "readlink|symlink|link"
+	case "fs":
+		return "truncate|realpath|statvfs"
+	}
+	return ""
 }
 
 // fileToolForAction maps a `file --action` onto the tool that implements it and
@@ -473,7 +512,7 @@ func (s *Server) directiveProfile(ctx context.Context, stmt directive.Statement,
 	if action == "list" {
 		// The profile listing is a set of names, one per line: copy-pasteable into
 		// the next `pty`/`pipe`.
-		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: listFromDoc(res, "configs", "name")}
+		return envelope.Slot{Code: 200, Headers: map[string]string{"Path": stmt.Path}, Body: listFromDoc(res, "ssh_configs", "name")}
 	}
 	doc, _ := toolResultMap(res)
 	return generatedSlot(stmt, win, compactDocument(doc))
@@ -527,9 +566,31 @@ func (s *Server) directiveExtension(ctx context.Context, stmt directive.Statemen
 	setFlagString(args, stmt, "notes", "notes")
 	setFlagNumber(args, stmt, "rows", "rows")
 	setFlagNumber(args, stmt, "cols", "cols")
-	setFlagList(args, stmt, "args", "args")
+	/* --args carries a program's argv, so it is an ARGV WORD LIST — the same
+	   grammar --argv uses for pipe/pty — and not a comma list: an argument may
+	   contain a comma, and the split mangled it silently. Its value is the rest
+	   of the line, so it must come last. */
+	if err := setFlagArgvList(args, stmt, "args", "args"); err != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: err.Error()}
+	}
+	/* --headers is the JSON object an HTTP MCP template sends on every relay
+	   request, so it takes the same treatment. It used to be in the parser's
+	   flag list and read by nobody at all, which is worse than not accepting it:
+	   the caller saw success and the header was never sent. */
+	if err := setFlagJSONObject(args, stmt, "headers", "headers"); err != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: err.Error()}
+	}
 	setFlagList(args, stmt, "allow", "allow")
 	setFlagList(args, stmt, "paths", "paths")
+	/* --forwards declares tunnels, and a tunnel is a structure rather than a
+	   word: it takes a JSON array of declarations. It also used to be accepted
+	   and ignored, so a template's tunnels never came up. */
+	if err := setFlagJSONList(args, stmt, "forwards", "forwards"); err != nil {
+		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
+			Body: err.Error()}
+	}
 	if boolFlag(stmt, "enabled") {
 		args["enabled"] = true
 	}
@@ -591,29 +652,66 @@ func (s *Server) refuseAction(ctx context.Context, stmt directive.Statement, cap
 	}, true
 }
 
-// directiveMCP handles the JSON-RPC entry point.
-func (s *Server) directiveMCP(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
-	// `mcp open` relays an HTTP endpoint. It does not consume a shell channel: the
-	// bridge speaks HTTP, so a caller can hold a dozen of them without spending
-	// the shell budget.
-	words := strings.Fields(stmt.Payload)
-	if len(words) == 0 {
+// directiveJRPC handles the three frame-channel entries.
+//
+// One function, because the doors differ only in what they do to the channel
+// after opening it (see term_jrpc.go): the subcommand split, the handle
+// registry and the reply shapes are identical, and three copies of them would be
+// three places for `recv` to disagree with itself.
+//
+// The split is done by hand rather than with strings.Fields because the FRAME is
+// the rest of the line, quotes included: Fields would split a JSON body on its
+// own spaces (`"name": "x"` becomes two words), and the payload keeps the
+// caller's quoting, so a quoted frame reached json.Unmarshal with its quotes
+// still on and was refused as "not JSON".
+func (s *Server) directiveJRPC(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	payload := strings.TrimSpace(stmt.Payload)
+	if payload == "" {
 		return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-			Body: "mcp needs a subcommand: open|tools|send|recv|call|close"}
+			Body: stmt.Op + " needs a subcommand: open|tools|send|recv|call|close"}
 	}
-	sub := words[0]
+	sub, rest := splitWord(payload)
 	switch sub {
 	case "open":
-		if len(words) < 2 {
-			return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-				Body: "mcp open needs a URL"}
-		}
-		return s.mcpOpen(ctx, stmt, words[1])
+		url, _ := splitWord(rest)
+		return s.jrpcOpen(ctx, stmt, stmt.Op, unquoteWord(url))
 	case "tools", "send", "recv", "call", "close":
-		return s.mcpChannel(ctx, stmt, sub, words[1:])
+		handle, tail := splitWord(rest)
+		args := []string{}
+		if handle != "" {
+			args = append(args, unquoteWord(handle))
+		}
+		if tail = strings.TrimSpace(tail); tail != "" {
+			args = append(args, tail)
+		}
+		return s.jrpcChannel(ctx, stmt, win, stmt.Op, sub, args)
 	}
 	return envelope.Slot{Code: 400, Headers: map[string]string{"Path": stmt.Path, "Error-Code": "invalid_argument"},
-		Body: "unknown mcp subcommand: " + sub}
+		Body: "unknown " + stmt.Op + " subcommand: " + sub}
+}
+
+// splitWord cuts the first whitespace-delimited word off s, returning it and the
+// rest. It is the one piece of word splitting `mcp` needs: the subcommand and the
+// handle are single words, and everything after them is a frame that must keep its
+// spaces.
+func splitWord(s string) (string, string) {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexAny(s, " \t"); i >= 0 {
+		return s[:i], strings.TrimSpace(s[i+1:])
+	}
+	return s, ""
+}
+
+// unquoteWord strips one layer of matching shell quotes, so `'{"a":1}'` and
+// `"{\"a\":1}"` both hand the same text to the JSON parser. An unquoted word is
+// returned unchanged.
+func unquoteWord(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 // directiveHelp prints the directive table, or one directive's syntax.
@@ -648,16 +746,45 @@ func (s *Server) directiveHelp(stmt directive.Statement, win termArgs) envelope.
 // A caller that has just been woken up knows nothing, so this call has to be legal,
 // cheap, and dense — never an error. It is the first move of every recovery, and
 // the recovery path must not depend on remembering anything.
-func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolResult, error) {
+func (s *Server) termGuide(ctx context.Context, win termArgs) termReply {
 	var b strings.Builder
 	b.WriteString("termcp terminal. Syntax:\n")
-	b.WriteString("  pty internal                                  open an interactive shell  -> Handle\n")
-	b.WriteString("  pipe internal --argv sh -c 'echo hi'          run a program to exit      -> Handle\n")
-	b.WriteString("  run a1f3:1 go build ./...                     one command, one call\n")
-	b.WriteString("  read a1f3:1 / ps / info a1f3:1                read, list, inspect\n")
-	b.WriteString("  help / help <directive>                       the full directive table\n")
+	// Two examples, and only two: the batching line says something the directive
+	// table below CANNOT express (that `;` runs several statements in one call and
+	// gives one slot each), and the pty line shows what a reply's handle is for.
+	// The other examples that used to sit here (`run … one command, one call`,
+	// `read … read, list, inspect`, the pty/pipe usage) repeated the table verbatim
+	// — 308 bytes of the same information written twice, which is what a caller
+	// pays for on every recovery call.
+	b.WriteString("  pty internal                                  open an interactive shell -> Handle\n")
+	b.WriteString("  ps; read a1f3:1; info a1f3:1                 several statements, one call: one slot each\n")
 	b.WriteString("Handles are <session>[:N]; copy one from ps or ext list into the next command.\n")
-	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n\n")
+	b.WriteString("Every reply is TERM/1 <code>: 2xx ok, 4xx bad request, 5xx the command failed.\n")
+
+	// The CORE directive table, plus the pointer to the rest.
+	//
+	// This reply is read by a caller that has not decided what to do yet, so the
+	// lines it needs come first and the other eighteen are one `help` away. Both
+	// halves matter:
+	//
+	//   - Listing all 24 here cost the recovery path ~900 bytes of capability the
+	//     caller has no use for at that moment, on every wake-up.
+	//   - Listing ONLY the core ones and stopping there would make file/forward/
+	//     extension work invisible to anyone who never suspects there is more —
+	//     the failure the old "7 of 23 examples" had, one layer down.
+	//
+	// The pointer line is what keeps both true. It names `help` in the same wording
+	// `help` uses for itself, so a caller that follows it lands on the full table
+	// rather than on a detail page, and it says how many are waiting. Generated
+	// from the same ops array `help` prints, so the two cannot disagree.
+	b.WriteString("\ndirectives (core; `help` lists all " + strconv.Itoa(len(directive.Ops())) + "):\n")
+	for _, op := range directive.Ops() {
+		if !op.Core {
+			continue
+		}
+		b.WriteString("  " + op.Usage + "\n")
+	}
+	b.WriteString("\n")
 
 	// What is running right now, in the same columns `ps` prints: the recovery path
 	// is "ask, then copy a handle", not "ask, then translate".
@@ -671,7 +798,7 @@ func (s *Server) termGuide(ctx context.Context, win termArgs) (*mcpgo.CallToolRe
 		}
 	}
 	body, code := capGenerated(b.String(), win)
-	return termSlotResult(envelope.Slot{Code: code, Body: body}), nil
+	return termReply{win: win, slots: []envelope.Slot{{Code: code, Body: body}}}
 }
 
 // --- small helpers ---
@@ -790,6 +917,14 @@ func listFromDoc(res *mcpgo.CallToolResult, listKey, field string) string {
 	items, _ := doc[listKey].([]any)
 	var b strings.Builder
 	for _, raw := range items {
+		// Some lists are plain names (ssh_configs), others are objects with a
+		// description beside the name. Both shapes reach here, and a listing that
+		// silently drops one of them reads as "there is nothing there".
+		if name, ok := raw.(string); ok {
+			b.WriteString(name)
+			b.WriteByte('\n')
+			continue
+		}
 		item, ok := raw.(map[string]any)
 		if !ok {
 			continue
@@ -883,6 +1018,11 @@ func setFlagNumber(args map[string]any, stmt directive.Statement, flag, arg stri
 }
 
 // setFlagList copies a comma-separated flag into a handler's array argument.
+//
+// This is right for a flag whose VALUES cannot contain a comma — a capability
+// name, a path (comma is legal in a path, but a path list written on one line is
+// the caller's own choice), an extension name. It is WRONG for a flag carrying a
+// command line, which is why --args does not use it: see setFlagJSONList.
 func setFlagList(args map[string]any, stmt directive.Statement, flag, arg string) {
 	v, ok := stmt.Flags[flag]
 	if !ok || v == "" {
@@ -896,4 +1036,77 @@ func setFlagList(args map[string]any, stmt directive.Statement, flag, arg string
 		}
 	}
 	args[arg] = out
+}
+
+// setFlagArgvList copies a flag written as an ARGV WORD LIST into a handler's
+// array argument, and refuses a value that is not one.
+//
+// The WHOLE word list is the value: in `--command node --args /srv/mcp.js mcp`,
+// --command names the program and --args carries the server script and its
+// arguments, so the first word is not dropped. The grammar is --argv's (the
+// shell's quoting, no expansion), because a program's arguments are a word list
+// everywhere else in this protocol and a second grammar here would be a trap.
+//
+// It replaced a comma split, which could not express an argument containing a
+// comma (`sh -c 'a,b'` became two arguments) and failed SILENTLY: the extension
+// started with a mangled argv and reported a startup error that named no flag.
+//
+// Empty is "not set" rather than an error: a caller clearing args on update
+// sends no flag at all, and an empty --args value is the same intent.
+func setFlagArgvList(args map[string]any, stmt directive.Statement, flag, arg string) error {
+	v, ok := stmt.Flags[flag]
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	// SplitArgv gives the command and the rest separately; both belong here, so
+	// the command goes back in front. Reading the two halves apart is still right:
+	// it is what refuses a command LINE (shell syntax) instead of a word list.
+	cmd, rest, err := directive.SplitArgv(v)
+	if err != nil {
+		return fmt.Errorf("--%s: %v", flag, err)
+	}
+	out := make([]any, 0, len(rest)+1)
+	if cmd != "" {
+		out = append(out, cmd)
+	}
+	for _, w := range rest {
+		out = append(out, w)
+	}
+	args[arg] = out
+	return nil
+}
+
+// setFlagJSONObject copies a flag written as a JSON object into a handler's map
+// argument (--headers). An HTTP template's headers are a map with caller-chosen
+// keys, which neither a comma list nor an argv can express.
+func setFlagJSONObject(args map[string]any, stmt directive.Statement, flag, arg string) error {
+	v, ok := stmt.Flags[flag]
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return fmt.Errorf("--%s must be a JSON object, e.g. --%s '%s' (got %q)",
+			flag, flag, `{"X-Api-Key":"..."}`, v)
+	}
+	args[arg] = out
+	return nil
+}
+
+// setFlagJSONList copies a flag written as a JSON array into a handler's array
+// argument, and refuses anything else. For a value that is a STRUCTURE rather
+// than a command line (--forwards: a list of tunnel declarations), where an argv
+// word list has no shape to describe it.
+func setFlagJSONList(args map[string]any, stmt directive.Statement, flag, arg string) error {
+	v, ok := stmt.Flags[flag]
+	if !ok || strings.TrimSpace(v) == "" {
+		return nil
+	}
+	var out []any
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return fmt.Errorf("--%s must be a JSON array, e.g. --%s '%s' (got %q)",
+			flag, flag, `[{...}]`, v)
+	}
+	args[arg] = out
+	return nil
 }

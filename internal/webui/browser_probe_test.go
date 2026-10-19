@@ -13,14 +13,85 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// browserProfileDir is the isolated Chrome profile directory for one probe.
+//
+// It is NOT t.TempDir(). Chrome runs crashpad as a separate process, and that
+// helper keeps CrashpadMetrics-active.pma open for seconds after the browser it
+// belongs to has exited. t.TempDir()'s cleanup runs the instant the test returns
+// and then fails the TEST with `unlinkat … CrashpadMetrics-active.pma: Access is
+// denied` — a flake whose message says nothing about what was being tested.
+//
+// The filename is Chrome's own (derived from the process type and its state) and
+// is not configurable, so renaming it is not an option: the problem was never the
+// name but the extra process holding a handle. --disable-crash-reporter,
+// --disable-breakpad and --disable-features=Crashpad were all tried and none of
+// them stops the file being created. So the fix is to stop racing it: retry the
+// removal while the handle drains, and sweep leftovers from earlier runs at the
+// start of the next one, which bounds what a run leaves behind to one directory
+// instead of an ever-growing pile.
+func browserProfileDir(t *testing.T) string {
+	t.Helper()
+	sweepStaleBrowserProfiles()
+	dir, err := os.MkdirTemp("", "termcp-chrome-")
+	if err != nil {
+		t.Fatalf("creating the browser profile: %v", err)
+	}
+	t.Cleanup(func() {
+		// Measured on Windows: usually gone at once, occasionally held for several
+		// seconds. Give it a real window, then leave it for the sweep rather than
+		// failing a passing test.
+		deadline := time.Now().Add(15 * time.Second)
+		for {
+			if err := os.RemoveAll(dir); err == nil || time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	})
+	return dir
+}
+
+// sweepStaleBrowserProfiles removes profile directories left by earlier runs.
+//
+// Only directories older than a minute are touched: a concurrent `go test` (the
+// suite runs with -shuffle and -race, and packages run in parallel) may be using
+// its own profile right now, and deleting that would break a passing test to
+// tidy up after a finished one.
+func sweepStaleBrowserProfiles() {
+	root := os.TempDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-time.Minute)
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "termcp-chrome-") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+	}
+}
+
 // Chrome's virtual-time dump can advance timers without drawing another frame.
 // Use its DevTools protocol with real time, and wait for the page's result. The
 // isolated profile and browser lifetime belong to this probe on every OS.
 func renderedProbeDOM(t *testing.T, chrome, path string) string {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	// The budget covers launching Chrome, loading the page and rendering the
+	// result. 30s was measured on a warm local machine and expired on a loaded CI
+	// runner (the read deadline fired at Page.navigate before the probe had
+	// produced anything), which is a slow machine, not a broken probe.
+	//
+	// 60s rather than more: the package has to fit inside the workflow's -timeout
+	// 240s together with every other test here, so a probe that needs longer than
+	// this would be a probe measuring the machine rather than the rendering.
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	profile := t.TempDir()
+	profile := browserProfileDir(t)
 	cmd := exec.CommandContext(ctx, chrome, "--headless=new", "--disable-gpu", "--no-sandbox",
 		"--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0",
 		"--user-data-dir="+profile, "about:blank")

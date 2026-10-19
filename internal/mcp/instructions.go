@@ -20,7 +20,7 @@ package mcp
 // not a rule from the start of the session.
 const mcpServerInstructions = `termcp agent rules:
 
-0) One tool: term(cmd), a terminal line: <directive> <handle> <payload>. No cmd = bearings (syntax, what runs, what is installed); help lists every directive, help <directive> teaches one. Guides: api.md, extensions.md.
+0) One tool: term(cmd), a terminal line: <directive> <handle> <payload>. No cmd = bearings (syntax, what runs, what is installed); help lists every directive, help <directive> teaches one. Guides: api.md.
 1) Handles: <session>[:N] = a connection, optionally a channel in it. Never invent one; copy the first column of ps or ext list. termcp:// locators work verbatim wherever a handle does.
 2) Mode: interactive shell (pty, the default) for multi-step work; drive it with run/type/key and read with read. A read returns ONLY new bytes: empty != done, keep reading. pipe --argv ONLY for a program that runs to exit; never split steps across separate opens (loses cwd/env). pipe internal = the termcp host's own terminal (local, no SSH).
 3) A reply is TERM/1: status line, headers only when meaningful (Path, Status, Exit-Code, Handle, Content-Range, Error-Code, Usage), then the raw body. code>=400 = isError. Content-Range end is inclusive: end+1 is the next --cursor.

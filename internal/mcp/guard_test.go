@@ -362,7 +362,7 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 	// would normally make them are themselves gated, which is the point.
 	// localDial=true keeps the tunnel off the SSH transport, so the test needs no
 	// client — it is the same call the internal profile makes.
-	fw, err := s.forwardMgr.CreateDynamic(sid, "restricted", 0, nil, true)
+	fw, err := s.forwardMgr.CreateDynamic(sid, "restricted", "", 0, nil, true)
 	if err != nil {
 		t.Fatalf("CreateDynamic: %v", err)
 	}
@@ -390,7 +390,7 @@ func TestGuardResolvesIndirectResourceIDs(t *testing.T) {
 	// invisible to every caller that predates the whitelist.
 	plain := createTestSession(t, s, api.ModePipe)
 	plainShell := s.sessMgr.Get(plain).PrimaryShellID()
-	fw2, err := s.forwardMgr.CreateDynamic(plain, "plain", 0, nil, true)
+	fw2, err := s.forwardMgr.CreateDynamic(plain, "plain", "", 0, nil, true)
 	if err != nil {
 		t.Fatalf("CreateDynamic: %v", err)
 	}
@@ -588,5 +588,51 @@ func TestGuardBatchRefusalStopsTheWrite(t *testing.T) {
 	}
 	if strings.Contains(string(out), "SHOULD_NOT_LAND") {
 		t.Fatalf("the refused write reached the restricted shell: %q", string(out))
+	}
+}
+
+// TestGuardGatesEveryHandleSpelling is a SECURITY regression test, not a
+// convenience one.
+//
+// checkEach skips an id that resolves to nothing, leaving the not-found error to
+// the handler. That is only safe while the guard resolves every spelling the
+// handler accepts — and it did not: `shell_id: "<sid>:2"` reached requireShell
+// (which understands the short handle) while sessionForShellID resolved nothing,
+// so a session restricted to shell_output accepted shell_input.
+//
+// The four spellings below are the same channel. Each must be refused, and the
+// bare-id cases must stay refused too, so a future spelling cannot be added to
+// one side only.
+func TestGuardGatesEveryHandleSpelling(t *testing.T) {
+	s := newTestServer(t)
+	sid := guardTestSession(t, s, []string{"shell_output"}, nil)
+
+	sess := s.sessMgr.Get(sid)
+	if sess == nil {
+		t.Fatal("session missing")
+	}
+	second, err := sess.CreateChildShell(testShell(), nil, false, 24, 80, "second")
+	if err != nil || second == nil {
+		t.Fatalf("creating a second channel: %v", err)
+	}
+
+	spellings := []string{
+		sid,                       // the session itself
+		second.ID,                 // a raw shell id
+		"termcp://#" + sid + ":2", // the locator the Web UI emits
+		sid + ":2",                // the short handle ps/info/pty print
+	}
+	for _, spelling := range spellings {
+		bad := (toolGuard{server: s}).check(context.Background(), "shell_input", lookupGate("shell_input"), makeRequest(map[string]any{
+			"shell_id": spelling,
+			"data":     "echo pwned\n",
+		}))
+		if bad == nil {
+			t.Errorf("shell_input with shell_id=%q was NOT refused: the whitelist does not gate this spelling", spelling)
+			continue
+		}
+		if code, _ := decodeToolError(t, bad); code != CodeForbidden {
+			t.Errorf("%q refused with code %q, want %q", spelling, code, CodeForbidden)
+		}
 	}
 }

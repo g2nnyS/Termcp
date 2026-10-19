@@ -11,6 +11,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/directive"
 	"github.com/open-mcp-ai/termcp/internal/envelope"
+	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/ns"
 	"github.com/open-mcp-ai/termcp/internal/session"
 	"github.com/open-mcp-ai/termcp/pkg/api"
@@ -83,8 +84,8 @@ func (s *Server) runDirective(ctx context.Context, stmt directive.Statement, win
 		return []envelope.Slot{s.directiveProfile(ctx, stmt, win)}
 	case "ext":
 		return []envelope.Slot{s.directiveExtension(ctx, stmt, win)}
-	case "mcp":
-		return []envelope.Slot{s.directiveMCP(ctx, stmt, win)}
+	case "jrpc", "mcp", "cdp":
+		return []envelope.Slot{s.directiveJRPC(ctx, stmt, win)}
 	case "alias":
 		return []envelope.Slot{s.directiveAlias(ctx, stmt, win)}
 	case "help":
@@ -271,6 +272,18 @@ func (s *Server) directiveRead(ctx context.Context, stmt directive.Statement, wi
 
 // directiveReadOne reads one channel.
 func (s *Server) directiveReadOne(ctx context.Context, stmt directive.Statement, win termArgs) envelope.Slot {
+	// bytes_limit 0 means "hand back the handle, consume nothing". readSlotAfter
+	// honours it; this path has to as well, or the one directive whose whole point
+	// is reading would be the one place the caller cannot decline to read.
+	// The offset is the stream's current end, so the reply still says where the
+	// next read starts.
+	if win.BytesLimit == 0 {
+		start, _ := s.outputSizeFor(stmt.Target)
+		return envelope.Slot{
+			Code:    204,
+			Headers: map[string]string{"Path": stmt.Path, "Content-Range": envelope.UnsatisfiedRange(start)},
+		}
+	}
 	args := argsOf("shell_id", stmt.Target)
 	if v, ok := stmt.Flags["cursor"]; ok {
 		args["offset"] = flagNumber(v)
@@ -485,25 +498,29 @@ func (s *Server) channelExitState(handle string) (status string, exit *int, clos
 	if s.sessMgr == nil {
 		return "", nil, false
 	}
-	// A handle is a shell id, a session id, or a locator naming either — the same
-	// three spellings every other directive accepts. Resolving through the guard's
-	// own resolver (rather than a direct manager call) is what keeps this from
-	// answering "still running" for a channel it simply failed to find.
+	// A handle is a raw shell id, a session id, a locator naming either, or the
+	// short `sid:N` that ps prints — every spelling locator.SplitHandle knows,
+	// because a handle the caller had to copy out of a reply must not be silent
+	// here: returning "still running" for a channel this simply failed to find is
+	// how a dead channel keeps reporting itself alive.
+	h := locator.SplitHandle(handle)
+	if h.Index > 0 {
+		// A channel was named explicitly, so that channel IS the question — the
+		// session-level fallbacks below would answer about a different one.
+		if sess := s.sessMgr.Get(h.SessionID); sess != nil {
+			if cs, err := s.shellFromIndex(sess, h.Index); err == nil && cs != nil {
+				info := cs.Info()
+				if info.Status == "exited" || info.Status == "error" {
+					return string(info.Status), info.ExitCode, true
+				}
+			}
+		}
+		return "", nil, false
+	}
 	if cs := s.sessMgr.GetChildShell(handle); cs != nil {
 		info := cs.Info()
 		if info.Status == "exited" || info.Status == "error" {
 			return string(info.Status), info.ExitCode, true
-		}
-		return "", nil, false
-	}
-	if sess := s.sessMgr.GetByShellID(handle); sess != nil {
-		// The handle names a channel of this session, so the channel is what the
-		// caller is asking about.
-		if cs := sess.GetChildShell(handle); cs != nil {
-			info := cs.Info()
-			if info.Status == "exited" || info.Status == "error" {
-				return string(info.Status), info.ExitCode, true
-			}
 		}
 		return "", nil, false
 	}

@@ -99,6 +99,31 @@ func TestHashIsNotATargetPrefix(t *testing.T) {
 	}
 }
 
+// TestQuotedTargetNamesTheSameThing pins that quoting is not part of a target: it
+// is what the shell strips before the directive sees the word. Quoting is also the
+// only way to write a word-initial '#', so this is the spelling `info '#sid'` — the
+// one a caller reaches for when the target is a `#<session>` locator — must not
+// lose its target.
+//
+// The regression it locks: the quoted form used to parse to the EMPTY string (a
+// source-slice reader refused the quote, its caller dropped the refusal), so the
+// reply was `Session ” not found` with nothing pointing at the quotes.
+func TestQuotedTargetNamesTheSameThing(t *testing.T) {
+	for _, cmd := range []string{
+		`info a1f3:1`,
+		`info 'a1f3:1'`,
+		`info "a1f3:1"`,
+	} {
+		f, err := Parse(cmd)
+		if err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		if got := f.Statements[0].Target; got != "a1f3:1" {
+			t.Errorf("%s: target = %q, want %q", cmd, got, "a1f3:1")
+		}
+	}
+}
+
 // TestLocatorSpellings pins both accepted target spellings: the short form
 // (which every reply emits) and the old termcp:// form (which the Web UI's copy
 // button still produces). The `#` inside a word is not a comment.
@@ -434,4 +459,204 @@ func asError(err error, target **Error) bool {
 		*target = e
 	}
 	return ok
+}
+
+// TestTrailingSemicolonIsNotPayload pins the fix for a `;` leaking into the
+// caller's bytes.
+//
+// Statements are separated by `;`, so `run h echo hi;` is ONE statement whose
+// text ends at `echo hi`. The parser sliced payloads to stmt.End(), which counts
+// the separator, so the shell received `echo hi;` — and worse, a trailing `;` on
+// a flag value or a handle produced `mcp tools a1f3:1;` → "shell 'a1f3:1;' not
+// found", and `alias x3 help read;` stored `x3 = help read;` instead of a
+// directive.
+func TestTrailingSemicolonIsNotPayload(t *testing.T) {
+	f, err := Parse("run a1f3:1 echo AAA;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Statements) != 1 {
+		t.Fatalf("statements = %d, want 1", len(f.Statements))
+	}
+	if got := f.Statements[0].Payload; got != "echo AAA" {
+		t.Errorf("payload = %q, want %q", got, "echo AAA")
+	}
+	if got := f.Statements[0].Path; got != "run a1f3:1 echo AAA" {
+		t.Errorf("path = %q", got)
+	}
+
+	// Same for a payload whose own text legitimately ends in punctuation, and for
+	// the two statements of a chain: each keeps its own bytes, neither keeps the
+	// separator.
+	f, err = Parse("run a1f3:1 echo A; run b:1 echo B;")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Statements) != 2 {
+		t.Fatalf("statements = %d, want 2", len(f.Statements))
+	}
+	if got := f.Statements[0].Payload; got != "echo A" {
+		t.Errorf("stmt0 payload = %q", got)
+	}
+	if got := f.Statements[1].Payload; got != "echo B" {
+		t.Errorf("stmt1 payload = %q", got)
+	}
+
+	// A quoted `;` belongs to the caller and must survive.
+	f, err = Parse(`run a1f3:1 echo 'a;b';`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Payload; got != `echo 'a;b'` {
+		t.Errorf("quoted semicolon payload = %q", got)
+	}
+
+	// --argv takes the rest of the statement: the separator stays out of the
+	// program's last argument.
+	f, err = Parse(`pipe mac --argv printf '[%s]' 'a';`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Flags["argv"]; got != `printf '[%s]' 'a'` {
+		t.Errorf("argv = %q", got)
+	}
+}
+
+// TestFwdTakesItsSessionAsTheTarget pins the positional form the usage line
+// advertises: `fwd <session> --action …`.
+//
+// The op was declared without Target, so the second word was never read as the
+// object: `fwd a1f3 --action dynamic` left stmt.Target empty and the forward tool
+// answered "session_id required" for a command that had named its session. The
+// only working spelling was the undocumented `--session`, which the usage line
+// does not mention — a documented form that cannot work and a working form that
+// is not documented.
+func TestFwdTakesItsSessionAsTheTarget(t *testing.T) {
+	f, err := Parse("fwd a1f3 --action dynamic --local-port 11080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Statements) != 1 {
+		t.Fatalf("got %d statements, want 1", len(f.Statements))
+	}
+	st := f.Statements[0]
+	if st.Target != "a1f3" {
+		t.Errorf("Target = %q, want %q", st.Target, "a1f3")
+	}
+	if got := st.Flags["action"]; got != "dynamic" {
+		t.Errorf("action = %q, want %q", got, "dynamic")
+	}
+	if got := st.Flags["local-port"]; got != "11080" {
+		t.Errorf("local-port = %q, want %q", got, "11080")
+	}
+
+	// The flag form still works: it is the one existing callers may be using.
+	f, err = Parse("fwd --session a1f3 --action list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Flags["session"]; got != "a1f3" {
+		t.Errorf("--session = %q, want %q", got, "a1f3")
+	}
+}
+
+// TestEveryFlagIsDocumented pins the flag table against the help text.
+//
+// A flag that exists but appears in no usage line and no Detail page is a flag
+// only the source knows about, which is the same as not having it: the caller
+// who needs `file --local-offset` reads `help file`, does not find it, and
+// concludes the capability is missing. The reverse is worse and is caught in the
+// mcp package, where a flag can be listed here and consumed nowhere.
+func TestEveryFlagIsDocumented(t *testing.T) {
+	for _, op := range Ops() {
+		if len(op.Flags) == 0 {
+			continue
+		}
+		// Usage may name flags; Detail is where the ones that do not fit belong.
+		documented := op.Usage + "\n" + op.Detail
+		var missing []string
+		for _, f := range op.Flags {
+			if !strings.Contains(documented, "--"+f) {
+				missing = append(missing, "--"+f)
+			}
+		}
+		if len(missing) > 0 {
+			t.Errorf("%s: %d flag(s) documented nowhere (neither Usage nor Detail): %s\n"+
+				"add them to the Detail page, or drop them from Flags if nothing consumes them",
+				op.Name, len(missing), strings.Join(missing, ", "))
+		}
+	}
+}
+
+// TestValuelessFlagsAreReal pins that a flag listed in Valueless is also in
+// Flags: the parser consults them separately, so an entry in one and not the
+// other is either a flag that can never be set or one that silently demands a
+// value it does not take.
+func TestValuelessFlagsAreReal(t *testing.T) {
+	for _, op := range Ops() {
+		for _, v := range op.Valueless {
+			if !slices.Contains(op.Flags, v) {
+				t.Errorf("%s: %q is Valueless but not in Flags", op.Name, v)
+			}
+		}
+	}
+}
+
+// TestExtArgsTakesTheRestOfTheLine pins --args to the same grammar --argv uses,
+// and pins that it takes the rest of the statement.
+//
+// --args used to be comma-split by the server, which cannot express an argv: an
+// argument may contain a comma, and `sh -c 'a,b'` became two arguments. The
+// failure was silent — the extension started with a mangled argv and reported a
+// startup error that named no flag — so the shape is pinned here, where the
+// parser can refuse it before anything runs.
+func TestExtArgsTakesTheRestOfTheLine(t *testing.T) {
+	f, err := Parse(`ext create srv --kind mcp --target internal --mode pipe --command node --args /srv/mcp.js --stdio --label 'a,b'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := f.Statements[0]
+	want := `/srv/mcp.js --stdio --label 'a,b'`
+	if got := st.Flags["args"]; got != want {
+		t.Errorf("args = %q, want %q (the rest of the line, quoting intact)", got, want)
+	}
+	// The other flags still parsed: --args stops the scan, it does not swallow
+	// what came before it.
+	for k, want := range map[string]string{"kind": "mcp", "target": "internal", "mode": "pipe", "command": "node"} {
+		if got := st.Flags[k]; got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+
+	// A known flag after --args is the caller's mistake, not a program argument.
+	if _, err := Parse(`ext create srv --args mcp --name srv`); err == nil {
+		t.Fatal("a flag after --args must be refused, not handed to the program")
+	} else if !strings.Contains(err.Error(), "flags come before --args") {
+		t.Errorf("error = %v, want it to name the ordering rule", err)
+	}
+}
+
+// TestExtensionsIsABuiltinSpellingOfExt pins the synonym.
+//
+// A caller reaches for `extensions` before reading help — it is the tool's own
+// name for the thing — and an unknown-directive error at that moment is the
+// documentation failing, not the caller. The synonym resolves to the canonical
+// name, so every downstream lookup (dispatch, capability) sees one spelling.
+func TestExtensionsIsABuiltinSpellingOfExt(t *testing.T) {
+	if _, ok := Lookup("extensions"); !ok {
+		t.Fatal("`extensions` must resolve; it is the tool's own name for `ext`")
+	}
+	f, err := Parse(`extensions list`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Statements[0].Op; got != "ext" {
+		t.Errorf("op = %q, want the canonical %q", got, "ext")
+	}
+	// help lists canonical names only: a synonym is a way in, not a second entry.
+	for _, name := range Names() {
+		if name == "extensions" {
+			t.Error("`extensions` must not appear as its own help entry")
+		}
+	}
 }
