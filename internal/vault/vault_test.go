@@ -348,3 +348,47 @@ func TestPassphraseNotPersisted(t *testing.T) {
 		t.Fatalf("walk vault: %v", err)
 	}
 }
+
+func TestResealAllAddsANewDevice(t *testing.T) {
+	v := initVault(t)
+	if err := v.Encrypt("prod", []byte("password = \"before-reseal\"")); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.AddRecipient("laptop", other.Recipient().String(), ""); err != nil {
+		t.Fatal(err)
+	}
+	// Before reseal, the new device cannot open the old ciphertext.
+	before, _ := os.ReadFile(filepath.Join(v.Dir(), "ssh_configs", "prod.age"))
+	if _, err := age.Decrypt(bytes.NewReader(before), other); err == nil {
+		t.Fatal("new device opened a file sealed before it was a recipient")
+	}
+	n, err := v.ResealAll()
+	if err != nil {
+		t.Fatalf("ResealAll: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("resealed %d, want 1", n)
+	}
+	after, _ := os.ReadFile(filepath.Join(v.Dir(), "ssh_configs", "prod.age"))
+	r, err := age.Decrypt(bytes.NewReader(after), other)
+	if err != nil {
+		t.Fatalf("new device cannot open a resealed file: %v", err)
+	}
+	got, _ := io.ReadAll(r)
+	if string(got) != "password = \"before-reseal\"" {
+		t.Fatalf("reseal lost content: %q", got)
+	}
+}
+
+func TestResealAllNeedsUnlock(t *testing.T) {
+	v := initVault(t)
+	v.Lock()
+	if _, err := v.ResealAll(); !errors.Is(err, ErrLocked) {
+		t.Fatalf("locked ResealAll: got %v, want ErrLocked", err)
+	}
+}

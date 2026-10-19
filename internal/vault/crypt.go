@@ -79,6 +79,32 @@ func (v *Vault) Decrypt(profileName string) ([]byte, error) {
 	return plain, nil
 }
 
+// ResealAll re-encrypts every sealed profile against the CURRENT recipients
+// table. It is the multi-device verb: after `recipients add <new-device>`,
+// existing ciphertext is still sealed to the old device set — ResealAll
+// re-wraps each profile so the new device can open it (and a removed device
+// stops opening newly written files). Needs an unlocked vault; returns the
+// number of profiles resealed.
+func (v *Vault) ResealAll() (int, error) {
+	if _, err := v.unlockedIdentity(); err != nil {
+		return 0, err
+	}
+	names, err := v.List()
+	if err != nil {
+		return 0, err
+	}
+	for _, name := range names {
+		plain, err := v.Decrypt(name)
+		if err != nil {
+			return 0, fmt.Errorf("reseal %q: %w", name, err)
+		}
+		if err := v.Encrypt(name, plain); err != nil {
+			return 0, fmt.Errorf("reseal %q: %w", name, err)
+		}
+	}
+	return len(names), nil
+}
+
 // Delete removes the profile's age file. Missing is not an error: deleting
 // is a cleanup gesture, and the caller's goal — no ciphertext left — is
 // already met.
