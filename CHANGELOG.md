@@ -79,6 +79,8 @@
 
   **sidecar 注入**：`POST /api/connections/batch?temporary=true&ttl_seconds=N` 注入的内存临时 profile 现在带 TTL，且在首个引用它的会话 DEAD 时自动清除——远程零信任实例的明文窗口收窄到任务存活期（见 `docs/deploy.md` 零信任远程实例章节）。`internal/sshclient.DialAuth` 预留了 `Signers` 字段，为 SSH CA 短期证书的长期方向留好接缝。
 
+  **多端同步**：`termcp vault recipients add <名字> <age1...>` 把新设备公钥加入 recipients 表，`termcp vault reseal` 把存量密文重封给当前全部设备；之后同步 `vault/recipients.toml` + `vault/ssh_configs/`（`identity.age` 永不出设备）即完成多端分发——relay 协议未实现前的手动同步路径已实测闭环（新设备加表前解不开旧密文，重封后可解开，落盘全程零明文）。
+
 - **配置导出可以设密码（#108 的第三项）**。`GET /api/connections/batch` 带上 `X-Termcp-Password` 头就导出一份加密文件（`TERMCP-ENC 1` 头 + base64 的 salt ‖ nonce ‖ AES-256-GCM 密文，按 64 列折行），导入时在同一个头里给密码就能打开。密码放**头**而不是 query：URL 会进 shell history、代理日志、浏览器历史，写在里面的密码和使用它的那一个动作就把它泄了。不带这个头就是原来那份明文 TOML，旧脚本与旧导出文件不受影响。
 
   为什么值得单独一个头：明文导出里装着凭据，而它的用途就是**离开这台机器**。没有密码时那份文件里什么都读不到；密码错了是被认证拒绝（GCM 验签）而不是解出一堆乱码；文件被改过也打不开。缺密码导入给 401 并指名该用哪个头，而不是把密文丢给 TOML 解析器报一个满屏 base64 里的语法错。

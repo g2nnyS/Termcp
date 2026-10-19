@@ -143,10 +143,11 @@ func main() {
 	if bridging {
 		endpoint, rest = splitStdioEndpoint(rest)
 	}
-	// The token namespace parses its own flags: its create action carries
-	// options the global set does not know. The raw args survive in rawRest.
+	// The token/vault namespaces parse their own flags: their actions carry
+	// positionals and options the global set does not know. The raw args
+	// survive in rawRest.
 	rawRest := rest
-	if subName != "token" {
+	if subName != "token" && subName != "vault" {
 		_ = flag.CommandLine.Parse(rest)
 	}
 
@@ -164,7 +165,7 @@ func main() {
 	}
 	cfg.ApplyEnv()
 
-	if args := flag.Args(); len(args) > 0 && subName != "token" {
+	if args := flag.Args(); len(args) > 0 && subName != "token" && subName != "vault" {
 		if sub, ok := findSubcommand(args[0]); ok {
 			// A word that is both a subcommand and an action of the namespace
 			// already in play (`termcp daemon start stdio`) is a misplaced
@@ -252,7 +253,7 @@ func main() {
 		return
 	}
 	if subName == "vault" {
-		runVaultCLI(cfg, action, flag.Args())
+		runVaultCLI(cfg, action, rawRest)
 		return
 	}
 	if subName == "token" {

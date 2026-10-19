@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,11 +21,34 @@ import (
 	"github.com/open-mcp-ai/termcp/internal/vault"
 )
 
-// runVaultCLI dispatches `termcp vault <action>`. init, migrate and the
-// recipients verbs work on the data directory directly; unlock, lock and
+// runVaultCLI dispatches `termcp vault <action>`. init, migrate, reseal and
+// the recipients verbs work on the data directory directly; unlock, lock and
 // status talk to the running instance over its REST API, because the vault's
 // unlocked state is per-process memory — only the daemon can unlock itself.
-func runVaultCLI(cfg *config.Config, action string, args []string) {
+//
+// Like the token namespace it parses its own FlagSet: actions carry
+// positionals (a recipient name, an age1… key) the global parser would choke
+// on or swallow. Shared connection flags must come before the positionals.
+func runVaultCLI(cfg *config.Config, action string, rest []string) {
+	fs := flag.NewFlagSet("vault", flag.ContinueOnError)
+	fs.StringVar(&cfg.Host, "host", cfg.Host, "instance address")
+	fs.IntVar(&cfg.Port, "port", cfg.Port, "instance port")
+	fs.StringVar(&cfg.DataDir, "data-dir", cfg.DataDir, "data directory")
+	fs.StringVar(&cfg.AuthToken, "auth-token", cfg.AuthToken, "operator token")
+	fs.StringVar(&cfg.AuthHash, "auth-hash", cfg.AuthHash, "operator token hash")
+	if action != "" && action != actionHelp {
+		if err := fs.Parse(rest); err != nil {
+			os.Exit(2)
+		}
+		for _, a := range fs.Args() {
+			if strings.HasPrefix(a, "-") {
+				fmt.Fprintf(os.Stderr, "vault %s: flags come before the action's arguments (got %q in the tail)\n", action, a)
+				os.Exit(2)
+			}
+		}
+	}
+	args := fs.Args()
+
 	var err error
 	switch action {
 	case "", actionHelp:
@@ -47,6 +71,8 @@ func runVaultCLI(cfg *config.Config, action string, args []string) {
 		err = vaultStatus(cfg)
 	case actionMigrate:
 		err = vaultMigrate(cfg)
+	case "reseal":
+		err = vaultReseal(cfg)
 	case actionRecipients:
 		err = vaultRecipients(cfg, args)
 	default:
@@ -67,6 +93,7 @@ func printVaultBrief(w io.Writer) {
 	fmt.Fprintln(w, "  lock                 lock the running instance")
 	fmt.Fprintln(w, "  status               show vault state (initialized/unlocked, sealed profiles)")
 	fmt.Fprintln(w, "  migrate              seal every plaintext profile into the vault and scrub the TOML")
+	fmt.Fprintln(w, "  reseal               re-encrypt all profiles to the current recipients (after recipients add/remove)")
 	fmt.Fprintln(w, "  recipients           list devices; `recipients add <name> <age1...> [note]` / `remove <name>`")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Reads and writes while locked fail with guidance; listing names always works.")
@@ -181,6 +208,33 @@ func vaultMigrate(cfg *config.Config) error {
 	if len(res.Failed) > 0 {
 		return fmt.Errorf("%d profile(s) failed; plaintext kept for each", len(res.Failed))
 	}
+	return nil
+}
+
+// vaultReseal re-encrypts every sealed profile to the current recipients
+// table — the multi-device verb: a newly added device opens the vault's
+// existing files only after a reseal.
+func vaultReseal(cfg *config.Config) error {
+	v := vault.New(cfg.DataDir)
+	if !v.Exists() {
+		return errors.New("no vault: run `termcp vault init` first")
+	}
+	if !v.IsUnlocked() {
+		if err := v.UnlockAuto(); err != nil {
+			pw, err := promptSecret("Vault passphrase: ")
+			if err != nil {
+				return err
+			}
+			if err := v.Unlock(pw); err != nil {
+				return err
+			}
+		}
+	}
+	n, err := v.ResealAll()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("resealed %d profile(s) to the current recipients\n", n)
 	return nil
 }
 
