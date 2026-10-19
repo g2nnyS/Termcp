@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/open-mcp-ai/termcp/internal/auth"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
 )
 
@@ -62,5 +63,40 @@ func TestImportTTLValidatesRange(t *testing.T) {
 		if out.Code != http.StatusBadRequest {
 			t.Errorf("ttl_seconds=%s: got %d, want 400", bad, out.Code)
 		}
+	}
+}
+
+// A scoped token needs profile.create to inject (the sidecar shape); without
+// it the import route refuses before parsing a byte.
+func TestImportRequiresProfileCreateScope(t *testing.T) {
+	st := sshconfig.NewStore(t.TempDir())
+	h := &Handler{SSH: st}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	post := func(t *testing.T, p *auth.Principal) int {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/connections/batch?temporary=true", strings.NewReader(ttlImportDoc))
+		if p != nil {
+			req = req.WithContext(auth.WithPrincipal(req.Context(), p))
+		}
+		out := httptest.NewRecorder()
+		mux.ServeHTTP(out, req)
+		return out.Code
+	}
+
+	// No principal (loopback, no auth middleware): the operator path, allowed.
+	if code := post(t, nil); code != http.StatusCreated {
+		t.Fatalf("operator import: %d", code)
+	}
+	// Scoped agent token without profile.create: refused.
+	code := post(t, &auth.Principal{ID: "t", Kind: auth.KindAgent, Tools: []string{"shell.output"}})
+	if code != http.StatusForbidden {
+		t.Fatalf("import without profile.create: %d, want 403", code)
+	}
+	// The sidecar token shape: profile.create only.
+	code = post(t, &auth.Principal{ID: "t2", Kind: auth.KindAgent, Tools: []string{"profile.create"}})
+	if code != http.StatusCreated {
+		t.Fatalf("import with profile.create: %d, want 201", code)
 	}
 }

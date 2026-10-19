@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/open-mcp-ai/termcp/internal/capability"
 	"github.com/open-mcp-ai/termcp/internal/configcrypt"
 	"github.com/open-mcp-ai/termcp/internal/locator"
 	"github.com/open-mcp-ai/termcp/internal/session"
@@ -241,6 +242,13 @@ func (h *Handler) handleExportConnections(w http.ResponseWriter, r *http.Request
 func (h *Handler) handleImportConnections(w http.ResponseWriter, r *http.Request) {
 	if h.SSH == nil {
 		http.Error(w, "ssh store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// Injection is profile creation: a scoped token needs profile.create in
+	// its tools whitelist — that is exactly the sidecar token's shape
+	// (`termcp token create --tools profile.create`), which can inject but
+	// cannot read or manage anything else.
+	if restRefuseTool(w, r, nil, capability.ProfileCreate) {
 		return
 	}
 	temporary := false

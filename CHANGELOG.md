@@ -69,7 +69,7 @@
 
 ### 新增
 
-- **Scoped token（#105 第三步）**。`termcp token create --kind agent --tools shell.input,shell.output --sessions <id> --approval-required --ttl 1h` 为每个 harness 签发独立授权：工具白名单按 capability id 在 MCP 与 REST 同口径生效、会话白名单按会话 id 或 profile 名匹配、`approval_required` 会强制该会话进入审阅模式、吊销即下一请求生效。token 明文只在创建响应出现一次，表里只存加盐校验值；MCP 调用日志带 `principal_id`/`principal_kind` 便于审计。token 管理面（`/api/tokens`）只对人面开放。
+- **Scoped token（#105 第三步）**。`termcp token create --kind agent --tools shell.input,shell.output --sessions <id> --approval-required --ttl 1h` 为每个 harness 签发独立授权：工具白名单按 capability id 在 MCP 与 REST 同口径生效、会话白名单按会话 id 或 profile 名匹配、`approval_required` 会强制该会话进入审阅模式、吊销即下一请求生效。token 明文只在创建响应出现一次，表里只存加盐校验值；MCP 调用日志带 `principal_id`/`principal_kind` 便于审计。token 管理面（`/api/tokens`）只对人面开放。sidecar 注入面（`POST /api/connections/batch`）要求 scoped token 带 `profile.create` 能力——`--tools profile.create` 签出的 token 只能注入、不能读取或管理。
 
 - **人面与 MCP 面 token 分离（#105 第二步）**。新增 `--mcp-auth-token` / `--mcp-auth-hash`（env `TERMCP_MCP_AUTH_TOKEN` / `TERMCP_MCP_AUTH_HASH`）：这把 token 只在 `/sse`、`/message`、`/stream` 三个 MCP 传输上有效；拿它调 REST 管理面、Web UI 或 WebSocket 一律 `403`（随机串仍是 `401`，403 不构成 oracle）。给 Agent 发 MCP token 而不发人面 token，它就够不到配置导出、sidecar 注入和实例管理。只配 `--auth-token` 时行为与之前完全一致；认证通过的请求在 context 里携带 `human|agent` 类别，为 scoped token 铺路。
 
