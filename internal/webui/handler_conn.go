@@ -38,6 +38,9 @@ type connectionSummary struct {
 var errSSHConfigRequired = errors.New("ssh_config is required")
 
 func (h *Handler) handleListConnections(w http.ResponseWriter, r *http.Request) {
+	if restRefuseTool(w, r, nil, capability.ProfileList) {
+		return
+	}
 	if h.SSH == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"connections": []connectionSummary{}})
 		return
@@ -82,6 +85,9 @@ func summarizeConnection(name string, ent *sshconfig.Entry) connectionSummary {
 }
 
 func (h *Handler) handleGetConnection(w http.ResponseWriter, r *http.Request) {
+	if restRefuseTool(w, r, nil, capability.ProfileList) {
+		return
+	}
 	name := r.PathValue("name")
 	if h.SSH == nil {
 		http.Error(w, "ssh store not configured", http.StatusServiceUnavailable)
@@ -109,6 +115,10 @@ func (h *Handler) handlePutConnection(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if h.SSH == nil {
 		http.Error(w, "ssh store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// PUT both creates and edits a profile; either capability admits the call.
+	if restRefuseToolAny(w, r, nil, capability.ProfileCreate, capability.ProfileEdit) {
 		return
 	}
 	if sshconfig.IsInternalName(name) {
@@ -175,6 +185,11 @@ func (h *Handler) handlePutConnection(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleExportConnections(w http.ResponseWriter, r *http.Request) {
 	if h.SSH == nil {
 		http.Error(w, "ssh store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// Export is the read that carries credentials: a scoped token without
+	// profile.list gets no export, sealed or not.
+	if restRefuseTool(w, r, nil, capability.ProfileList) {
 		return
 	}
 	// names=a,b exports just those profiles; absent or empty exports all. An
@@ -346,6 +361,9 @@ func (h *Handler) handleDeleteConnection(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "ssh store not configured", http.StatusServiceUnavailable)
 		return
 	}
+	if restRefuseTool(w, r, nil, capability.ProfileDelete) {
+		return
+	}
 	if strings.Contains(name, ",") {
 		results := make([]map[string]any, 0)
 		for _, part := range strings.Split(name, ",") {
@@ -377,6 +395,11 @@ func (h *Handler) handleDeleteConnection(w http.ResponseWriter, r *http.Request)
 func (h *Handler) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	if h.SSH == nil {
 		http.Error(w, "ssh store not configured", http.StatusServiceUnavailable)
+		return
+	}
+	// Testing a connection spends the stored credential against the host: it
+	// is a read-side probe, so it follows the read capability.
+	if restRefuseTool(w, r, nil, capability.ProfileList) {
 		return
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))

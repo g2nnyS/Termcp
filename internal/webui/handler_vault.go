@@ -22,6 +22,11 @@ type vaultStatus struct {
 }
 
 func (h *Handler) handleVaultStatus(w http.ResponseWriter, r *http.Request) {
+	// Vault state is instance management, not a capability: operator only,
+	// same rule as the token routes.
+	if !h.requireOperator(w, r) {
+		return
+	}
 	if h.Vault == nil || !h.Vault.Exists() {
 		writeJSON(w, http.StatusOK, vaultStatus{})
 		return
@@ -40,6 +45,9 @@ func (h *Handler) handleVaultStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleVaultUnlock(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOperator(w, r) {
+		return
+	}
 	if h.Vault == nil || !h.Vault.Exists() {
 		http.Error(w, "no vault: run `termcp vault init` first", http.StatusNotFound)
 		return
@@ -65,6 +73,9 @@ func (h *Handler) handleVaultUnlock(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handleVaultLock(w http.ResponseWriter, r *http.Request) {
+	if !h.requireOperator(w, r) {
+		return
+	}
 	if h.Vault == nil || !h.Vault.Exists() {
 		http.Error(w, "no vault: run `termcp vault init` first", http.StatusNotFound)
 		return

@@ -63,6 +63,46 @@ func restRefuseTool(w http.ResponseWriter, r *http.Request, sess *session.Sessio
 	return true
 }
 
+// restRefuseToolAny is restRefuseTool for a route that maps to more than one
+// capability (PUT creates a new profile and edits an existing one): each gate
+// — the principal's tools whitelist, then the session's template — passes when
+// it allows ANY of the capabilities.
+func restRefuseToolAny(w http.ResponseWriter, r *http.Request, sess *session.Session, capIDs ...string) bool {
+	if p, ok := auth.PrincipalFromContext(r.Context()); ok && p != nil && len(p.Tools) > 0 {
+		allowed := false
+		for _, id := range capIDs {
+			if slices.Contains(p.Tools, id) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error_code": "forbidden",
+				"error":      "this token's scope does not include any of " + strings.Join(capIDs, ", "),
+			})
+			return true
+		}
+	}
+	if sess != nil {
+		allowed := false
+		for _, id := range capIDs {
+			if sess.Restriction().Allows(id) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error_code": "forbidden",
+				"error":      session.ForbiddenTool(capability.ToolForID(capIDs[0])),
+			})
+			return true
+		}
+	}
+	return false
+}
+
 // restRefuseSessionIDs answers a comma-separated session id list when ANY entry
 // is restricted, and reports whether it did. The list is resolved the way the
 // MCP guard resolves one — a raw id, or a termcp:// locator — so a caller cannot

@@ -9,6 +9,7 @@ import (
 
 	"github.com/open-mcp-ai/termcp/internal/auth"
 	"github.com/open-mcp-ai/termcp/internal/sshconfig"
+	"github.com/open-mcp-ai/termcp/internal/vault"
 )
 
 const ttlImportDoc = `[[connections]]
@@ -98,5 +99,102 @@ func TestImportRequiresProfileCreateScope(t *testing.T) {
 	code = post(t, &auth.Principal{ID: "t2", Kind: auth.KindAgent, Tools: []string{"profile.create"}})
 	if code != http.StatusCreated {
 		t.Fatalf("import with profile.create: %d, want 201", code)
+	}
+}
+
+// The review gaps: reads of profiles need profile.list, deletes need
+// profile.delete, and the operator principal must keep passing every gate it
+// always passed (regression guard).
+func TestScopedTokenProfileReadWriteGates(t *testing.T) {
+	st := sshconfig.NewStore(t.TempDir())
+	h := &Handler{SSH: st}
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	seed := "kind = \"remote\"\nhost = \"h\"\nuser = \"u\"\npassword = \"p\"\n"
+	put := httptest.NewRecorder()
+	mux.ServeHTTP(put, httptest.NewRequest(http.MethodPut, "/api/connections/prod", strings.NewReader(seed)))
+	if put.Code != http.StatusNoContent {
+		t.Fatalf("seed PUT: %d %s", put.Code, put.Body.String())
+	}
+
+	call := func(method, path, body string, p *auth.Principal) int {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if p != nil {
+			req = req.WithContext(auth.WithPrincipal(req.Context(), p))
+		}
+		out := httptest.NewRecorder()
+		mux.ServeHTTP(out, req)
+		return out.Code
+	}
+
+	createOnly := &auth.Principal{ID: "sidecar", Kind: auth.KindAgent, Tools: []string{"profile.create"}}
+	readOnly := &auth.Principal{ID: "reader", Kind: auth.KindAgent, Tools: []string{"profile.list"}}
+
+	// The sidecar token: injects, but cannot read, list, export or delete.
+	if code := call(http.MethodGet, "/api/connections/prod", "", createOnly); code != http.StatusForbidden {
+		t.Errorf("create-only GET single: %d, want 403", code)
+	}
+	if code := call(http.MethodGet, "/api/connections", "", createOnly); code != http.StatusForbidden {
+		t.Errorf("create-only GET list: %d, want 403", code)
+	}
+	if code := call(http.MethodGet, "/api/connections/batch", "", createOnly); code != http.StatusForbidden {
+		t.Errorf("create-only GET export: %d, want 403", code)
+	}
+	if code := call(http.MethodDelete, "/api/connections/prod", "", createOnly); code != http.StatusForbidden {
+		t.Errorf("create-only DELETE: %d, want 403", code)
+	}
+
+	// A read token reads but cannot write.
+	if code := call(http.MethodGet, "/api/connections/prod", "", readOnly); code != http.StatusOK {
+		t.Errorf("reader GET single: %d, want 200", code)
+	}
+	if code := call(http.MethodPut, "/api/connections/other", seed, readOnly); code != http.StatusForbidden {
+		t.Errorf("reader PUT: %d, want 403", code)
+	}
+
+	// The operator principal (no Tools list) keeps passing every route it
+	// always passed — this is the case the review flagged as untested.
+	op := &auth.Principal{ID: "operator", Kind: auth.KindOperator}
+	for _, tc := range []struct {
+		method, path string
+		want         int
+	}{
+		{http.MethodGet, "/api/connections/prod", http.StatusOK},
+		{http.MethodGet, "/api/connections", http.StatusOK},
+		{http.MethodGet, "/api/connections/batch", http.StatusOK},
+		{http.MethodPut, "/api/connections/prod", http.StatusNoContent},
+		{http.MethodDelete, "/api/connections/prod", http.StatusNoContent},
+	} {
+		if code := call(tc.method, tc.path, seed, op); code != tc.want {
+			t.Errorf("operator %s %s: %d, want %d", tc.method, tc.path, code, tc.want)
+		}
+	}
+}
+
+func TestVaultRoutesRefuseAgentPrincipal(t *testing.T) {
+	v := vault.New(t.TempDir())
+	if _, err := v.Init("vault gate test"); err != nil {
+		t.Fatalf("vault init: %v", err)
+	}
+	h := &Handler{Vault: v}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/vault", h.handleVaultStatus)
+	mux.HandleFunc("POST /api/vault/unlock", h.handleVaultUnlock)
+	mux.HandleFunc("POST /api/vault/lock", h.handleVaultLock)
+
+	agent := &auth.Principal{ID: "t", Kind: auth.KindAgent, Tools: []string{"profile.create"}}
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/vault"},
+		{http.MethodPost, "/api/vault/unlock"},
+		{http.MethodPost, "/api/vault/lock"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{"passphrase":"x"}`))
+		req = req.WithContext(auth.WithPrincipal(req.Context(), agent))
+		out := httptest.NewRecorder()
+		mux.ServeHTTP(out, req)
+		if out.Code != http.StatusForbidden {
+			t.Errorf("agent %s %s: %d, want 403", tc.method, tc.path, out.Code)
+		}
 	}
 }
